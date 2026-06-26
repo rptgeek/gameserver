@@ -11,6 +11,9 @@ usage() {
 Usage:
   ./start-game-spot.sh [profile-or-path] [instance-size] [options]
 
+  Optional profile preset:
+  --profile NAME       Use profile from game-profiles/NAME.env
+
   profile-or-path:
     - defaults to 7d2d when omitted
     - accepts a profile name (7d2d) or explicit profile path (./path/to/profile.env)
@@ -29,11 +32,13 @@ Options:
                         - any explicit branch name
   --list-recommendations
                         Print recommended sizes and continue launch
+  --profile NAME        Equivalent to passing a profile name/path argument
   -h, --help            Show this help
 USAGE
 }
 
 PROFILE_ARG="7d2d"
+PROFILE_OVERRIDE=""
 INSTANCE_TYPE_CLI=""
 SHOW_RECOMMENDED=0
 PROFILE_SET=0
@@ -77,6 +82,15 @@ while [[ $# -gt 0 ]]; do
     --list-recommendations|--recommended)
       SHOW_RECOMMENDED=1
       ;;
+    --profile)
+      if [[ $# -eq 0 ]]; then
+        echo "Missing value for --profile" >&2
+        usage
+        exit 1
+      fi
+      PROFILE_OVERRIDE="$1"
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -103,6 +117,10 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ -n "${PROFILE_OVERRIDE}" ]]; then
+  PROFILE_ARG="${PROFILE_OVERRIDE}"
+fi
 
 if [[ -f "$PROFILE_ARG" ]]; then
   PROFILE_PATH="$PROFILE_ARG"
@@ -158,6 +176,7 @@ GAME_SERVICE="${GAME_NAME//[^A-Za-z0-9-]/-}"
 GAME_SERVICE="${GAME_SERVICE,,}"
 BACKUP_INTERVAL_MINUTES="${BACKUP_INTERVAL_MINUTES:-10}"
 BACKUP_BOOT_OFFSET_MINUTES="${BACKUP_BOOT_OFFSET_MINUTES:-${BACKUP_INTERVAL_MINUTES}}"
+STOP_TIMEOUT_SECONDS="${STOP_TIMEOUT_SECONDS:-30}"
 WORLD_BUCKET_REGION="${WORLD_BUCKET_REGION:-$AWS_REGION}"
 	MAX_SPOT_PRICE="${MAX_SPOT_PRICE:-}"
 	SPOT_PRICE_BUMP_PERCENT="${SPOT_PRICE_BUMP_PERCENT:-25}"
@@ -184,9 +203,19 @@ if ! which base64 >/dev/null 2>&1; then
 fi
 
 if [[ -n "${AMI_ID:-}" ]]; then
-	  AMI="${AMI_ID}"
-	else
-	  AMI="$(
+  if [[ "$AMI_ID" == /aws/service/* ]]; then
+    AMI="$(
+      "${aws_cmd[@]}" ssm get-parameter \
+        --region "$AWS_REGION" \
+        --name "$AMI_ID" \
+        --query "Parameter.Value" \
+        --output text
+    )"
+  else
+    AMI="${AMI_ID}"
+  fi
+else
+  AMI="$(
     "${aws_cmd[@]}" ssm get-parameter \
       --region "$AWS_REGION" \
       --name "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64" \
@@ -264,7 +293,7 @@ STEAM_BETA_PASSWORD="${STEAM_BETA_PASSWORD}"
 GAME_HOME="${GAME_HOME}"
 BACKUP_INTERVAL_MINUTES="${BACKUP_INTERVAL_MINUTES}"
 BACKUP_BOOT_OFFSET_MINUTES="${BACKUP_BOOT_OFFSET_MINUTES}"
-STOP_TIMEOUT_SECONDS="${STOP_TIMEOUT_SECONDS:-15}"
+STOP_TIMEOUT_SECONDS="${STOP_TIMEOUT_SECONDS:-30}"
 GAME_INSTALL_CMD_B64="${GAME_INSTALL_B64}"
 GAME_START_CMD_B64="${GAME_START_B64}"
 GAME_SERVICE="${GAME_SERVICE}"
@@ -280,7 +309,7 @@ mkdir -p "/var/log/\${GAME_NAME}" "\${STATE_TOOLS_DIR}"
 
 if command -v yum >/dev/null 2>&1; then
   yum -y update
-  yum -y install ca-certificates tar gzip glibc
+  yum -y install ${YUM_BASE_PACKAGES:-ca-certificates tar gzip glibc libstdc++}
 elif command -v apt-get >/dev/null 2>&1; then
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
@@ -329,7 +358,50 @@ install_game() {
     chmod +x /opt/steamcmd/steamcmd.sh
   fi
 
-  eval "\$(decode "\$GAME_INSTALL_CMD_B64")"
+  install_cmd="\$(decode "\$GAME_INSTALL_CMD_B64")"
+  local install_branches
+  local tried_branches
+  local branch
+  local install_ok=0
+
+  install_branches=()
+  tried_branches=()
+
+  if [[ -n "\${STEAM_BETA_BRANCH}" ]]; then
+    install_branches+=("\${STEAM_BETA_BRANCH}")
+  fi
+
+  case "\${STEAM_BETA_BRANCH}" in
+    latest_experimental|latest-experimental|latestexperimental|experimental|beta)
+      install_branches+=("experimental")
+      ;;
+  esac
+
+  install_branches+=("")
+
+  for branch in "\${install_branches[@]}"; do
+    if [[ " \${tried_branches[*]} " == *" \${branch} "* ]]; then
+      continue
+    fi
+    tried_branches+=("\${branch}")
+
+    if [[ -n "\${branch}" ]]; then
+      echo "Attempting app_update using beta branch: \${branch}"
+    else
+      echo "Attempting app_update using public branch"
+    fi
+
+    if STEAM_BETA_BRANCH="\${branch}" bash -lc "\${install_cmd}"; then
+      echo "Steam install succeeded."
+      install_ok=1
+      break
+    fi
+  done
+
+  if [[ "\$install_ok" -ne 1 ]]; then
+    echo "All app_update attempts failed."
+    return 1
+  fi
 }
 
 cat > "\${STATE_TOOLS_DIR}/restore-state.sh" <<'EOS'
@@ -348,7 +420,7 @@ cat > "\${STATE_TOOLS_DIR}/stop-server.command" <<'EOS'
 #!/usr/bin/env bash
 set -euo pipefail
 
-STOP_TIMEOUT_SECONDS="${STOP_TIMEOUT_SECONDS:-15}"
+STOP_TIMEOUT_SECONDS="${STOP_TIMEOUT_SECONDS:-30}"
 
 game_pids="\$(pgrep -f "7DaysToDieServer.x86_64" || true)"
 if [[ -n "\${game_pids}" ]]; then

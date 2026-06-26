@@ -80,6 +80,14 @@ You can also add profile-level overrides in your shell; any env var in the profi
 ./scripts/start-game-spot.sh 7d2d
 ```
 
+You can also launch via profile name:
+
+```bash
+./scripts/start-game-spot.sh --profile 7d2d-east1
+./scripts/start-game-spot.sh --profile 7d2d-west2
+./scripts/start-game-spot.sh --profile 7d2d-east1 --branch latest_experimental
+```
+
 Launch on a specific branch:
 
 ```bash
