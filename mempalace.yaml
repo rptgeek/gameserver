@@ -1,0 +1,10 @@
+wing: 7d2d
+rooms:
+- name: scripts
+  description: Files from scripts/
+  keywords:
+  - scripts
+  - scripts
+- name: general
+  description: Files that don't fit other rooms
+  keywords: []

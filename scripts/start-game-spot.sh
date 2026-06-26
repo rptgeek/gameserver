@@ -1,0 +1,383 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+GAME_PROFILES_DIR="${GAME_PROFILES_DIR:-${SCRIPT_DIR}/game-profiles}"
+STATE_DIR="${STATE_DIR:-${SCRIPT_DIR}/.game-spot}"
+mkdir -p "$STATE_DIR"
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  ./start-game-spot.sh [profile-or-path] [instance-size] [options]
+
+  profile-or-path:
+    - defaults to 7d2d when omitted
+    - accepts a profile name (7d2d) or explicit profile path (./path/to/profile.env)
+  instance-size:
+    - optional EC2 instance type (e.g., c7i.xlarge, c7i.2xlarge)
+    - can also be provided via --size or --instance-type
+
+Options:
+  --size TYPE, --instance-type TYPE
+                        Select instance size for this launch
+  --list-recommendations
+                        Print recommended sizes and continue launch
+  -h, --help            Show this help
+USAGE
+}
+
+PROFILE_ARG="7d2d"
+INSTANCE_TYPE_CLI=""
+SHOW_RECOMMENDED=0
+PROFILE_SET=0
+
+while [[ $# -gt 0 ]]; do
+  arg="$1"
+  shift
+  case "$arg" in
+    --size|--instance-type)
+      if [[ $# -eq 0 ]]; then
+        echo "Missing value for $arg" >&2
+        usage
+        exit 1
+      fi
+      INSTANCE_TYPE_CLI="$1"
+      shift
+      ;;
+    --list-recommendations|--recommended)
+      SHOW_RECOMMENDED=1
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --)
+      break
+      ;;
+    --*)
+      echo "Unknown option: $arg" >&2
+      usage
+      exit 1
+      ;;
+    *)
+      if [[ "$PROFILE_SET" -eq 0 ]]; then
+        PROFILE_ARG="$arg"
+        PROFILE_SET=1
+      elif [[ -z "$INSTANCE_TYPE_CLI" ]]; then
+        INSTANCE_TYPE_CLI="$arg"
+      else
+        echo "Unexpected argument: $arg" >&2
+        usage
+        exit 1
+      fi
+      ;;
+  esac
+done
+
+if [[ -f "$PROFILE_ARG" ]]; then
+  PROFILE_PATH="$PROFILE_ARG"
+  PROFILE_NAME="${PROFILE_PATH##*/}"
+  PROFILE_NAME="${PROFILE_NAME%.env}"
+else
+  PROFILE_PATH="${GAME_PROFILES_DIR}/${PROFILE_ARG}.env"
+  PROFILE_NAME="$PROFILE_ARG"
+fi
+
+if [[ ! -f "$PROFILE_PATH" ]]; then
+  echo "Profile not found: $PROFILE_PATH" >&2
+  exit 1
+fi
+
+set -a
+. "$PROFILE_PATH"
+set +a
+
+if [[ -z "${GAME_NAME:-}" ]]; then
+  GAME_NAME="$PROFILE_NAME"
+fi
+
+: "${RECOMMENDED_INSTANCE_TYPES:=c7i.xlarge # economy (4vCPU/8GiB)\nc7i.2xlarge # recommended (8vCPU/16GiB)\nc7i.4xlarge # heavy (16vCPU/32GiB)}"
+: "${WORLD_BUCKET:?WORLD_BUCKET must be set in profile or environment}"
+: "${S3_PREFIX:?S3_PREFIX must be set in profile or environment}"
+: "${SUBNET_ID:?SUBNET_ID must be set in profile or environment}"
+: "${SECURITY_GROUP_IDS:?SECURITY_GROUP_IDS must be set in profile or environment}"
+: "${KEY_NAME:?KEY_NAME must be set in profile or environment}"
+: "${IAM_INSTANCE_PROFILE:?IAM_INSTANCE_PROFILE must be set in profile or environment}"
+: "${GAME_INSTALL_CMD:?GAME_INSTALL_CMD must be set in profile or environment}"
+: "${GAME_START_CMD:?GAME_START_CMD must be set in profile or environment}"
+
+AWS_REGION="${AWS_REGION:-us-east-1}"
+PROFILE_DEFAULT_INSTANCE_TYPE="${DEFAULT_INSTANCE_TYPE:-c7i.xlarge}"
+INSTANCE_TYPE="${INSTANCE_TYPE_CLI:-${INSTANCE_TYPE:-$PROFILE_DEFAULT_INSTANCE_TYPE}}"
+VOLUME_SIZE_GIB="${VOLUME_SIZE_GIB:-80}"
+STATE_DIR_PATH="${STATE_DIR_PATH:-/srv/${GAME_NAME}-state}"
+STATE_LINK="${STATE_LINK:-/home/ec2-user/.local/share/${GAME_NAME}}"
+GAME_HOME="${GAME_HOME:-/opt/${GAME_NAME}}"
+GAME_SERVICE="${GAME_NAME//[^A-Za-z0-9-]/-}"
+GAME_SERVICE="${GAME_SERVICE,,}"
+BACKUP_INTERVAL_MINUTES="${BACKUP_INTERVAL_MINUTES:-10}"
+WORLD_BUCKET_REGION="${WORLD_BUCKET_REGION:-$AWS_REGION}"
+MAX_SPOT_PRICE="${MAX_SPOT_PRICE:-}"
+GAME_STATE_PREFIX="${S3_PREFIX%/}/${GAME_NAME}"
+WORLD_PREFIX="${GAME_STATE_PREFIX}"
+SERVER_NAME="${SERVER_NAME:-${GAME_NAME}-spot-server}"
+
+if [[ "$SHOW_RECOMMENDED" -eq 1 ]]; then
+  echo "Recommended instance types for ${GAME_NAME}:"
+  printf '%s\n' "$RECOMMENDED_INSTANCE_TYPES" | sed '/^[[:space:]]*$/d' | sed 's/^/ - /'
+fi
+echo "Selected instance type: ${INSTANCE_TYPE}"
+
+read -r -a SECURITY_GROUP_ID_ARRAY <<< "$SECURITY_GROUP_IDS"
+
+aws_cmd=(aws)
+if [[ -n "${AWS_PROFILE:-}" ]]; then
+  aws_cmd+=(--profile "$AWS_PROFILE")
+fi
+
+if ! which base64 >/dev/null 2>&1; then
+  echo "base64 is required." >&2
+  exit 1
+fi
+
+if [[ -n "${AMI_ID:-}" ]]; then
+  AMI="${AMI_ID}"
+else
+  AMI="$(
+    "${aws_cmd[@]}" ssm get-parameter \
+      --region "$AWS_REGION" \
+      --name "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64" \
+      --query "Parameter.Value" \
+      --output text
+  )"
+fi
+
+if [[ -z "${AMI}" || "${AMI}" == "None" ]]; then
+  echo "Could not resolve AMI_ID" >&2
+  exit 1
+fi
+
+TMP_USER_DATA="$(mktemp)"
+trap 'rm -f "$TMP_USER_DATA"' EXIT
+
+GAME_INSTALL_B64="$(printf '%s' "$GAME_INSTALL_CMD" | base64 -w0)"
+GAME_START_B64="$(printf '%s' "$GAME_START_CMD" | base64 -w0)"
+
+cat > "$TMP_USER_DATA" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+
+export AWS_DEFAULT_REGION="${WORLD_BUCKET_REGION}"
+
+WORLD_BUCKET="${WORLD_BUCKET}"
+WORLD_PREFIX="${WORLD_PREFIX}"
+STATE_DIR_PATH="${STATE_DIR_PATH}"
+STATE_LINK="${STATE_LINK}"
+GAME_HOME="${GAME_HOME}"
+BACKUP_INTERVAL_MINUTES="${BACKUP_INTERVAL_MINUTES}"
+GAME_INSTALL_CMD_B64="${GAME_INSTALL_B64}"
+GAME_START_CMD_B64="${GAME_START_B64}"
+GAME_SERVICE="${GAME_SERVICE}"
+GAME_NAME="${GAME_NAME}"
+STATE_TOOLS_DIR="/opt/\${GAME_SERVICE}-tools"
+
+decode() {
+  printf '%s' "\$1" | base64 -d
+}
+
+mkdir -p "/var/log/\${GAME_NAME}" "\${STATE_TOOLS_DIR}"
+
+yum -y update
+yum -y install ca-certificates tar gzip glibc
+if ! command -v curl >/dev/null 2>&1; then
+  yum -y install curl-minimal || yum -y install curl || true
+fi
+
+mkdir -p "\${STATE_DIR_PATH}"
+mkdir -p "\${STATE_LINK%/*}"
+ln -sfn "\${STATE_DIR_PATH}" "\${STATE_LINK}"
+
+restore_state() {
+  aws s3 sync "s3://\${WORLD_BUCKET}/\${WORLD_PREFIX}/state/" "\${STATE_DIR_PATH}/" || true
+}
+
+upload_state() {
+  aws s3 sync "\${STATE_DIR_PATH}/" "s3://\${WORLD_BUCKET}/\${WORLD_PREFIX}/state/" --delete
+}
+
+install_game() {
+  mkdir -p /opt/steamcmd "\${GAME_HOME%/*}"
+  if [[ ! -x /opt/steamcmd/steamcmd.sh ]]; then
+    curl -fsSL https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz -o /tmp/steamcmd_linux.tar.gz
+    tar -xzf /tmp/steamcmd_linux.tar.gz -C /opt/steamcmd
+    chmod +x /opt/steamcmd/steamcmd.sh
+  fi
+
+  eval "\$(decode "\$GAME_INSTALL_CMD_B64")"
+}
+
+cat > "\${STATE_TOOLS_DIR}/restore-state.sh" <<'EOS'
+#!/usr/bin/env bash
+set -euo pipefail
+restore_state
+EOS
+
+cat > "\${STATE_TOOLS_DIR}/upload-state.sh" <<'EOS'
+#!/usr/bin/env bash
+set -euo pipefail
+upload_state
+EOS
+
+cat > "\${STATE_TOOLS_DIR}/start-server.command" <<'START_SERVER_CMD'
+#!/usr/bin/env bash
+set -euo pipefail
+
+decode() {
+  printf '%s' "\$1" | base64 -d
+}
+
+GAME_START_CMD_B64="${GAME_START_B64}"
+eval "\$(decode "\$GAME_START_CMD_B64")"
+START_SERVER_CMD
+
+cat > "\${STATE_TOOLS_DIR}/spot-watchdog.sh" <<'EOS'
+#!/usr/bin/env bash
+set -euo pipefail
+NOTICE_URL="http://169.254.169.254/latest/meta-data/spot/instance-action"
+while true; do
+  if notice="\$(curl -fsS --max-time 1 "\$NOTICE_URL" || true)"; then
+    if [[ "\$notice" == *\"action\"* ]]; then
+      /opt/\${GAME_SERVICE}-tools/upload-state.sh || true
+      /usr/bin/systemctl stop "\${GAME_SERVICE}-server.service" || true
+      /usr/sbin/shutdown -h now "Spot termination notice"
+      exit 0
+    fi
+  fi
+  sleep 15
+done
+EOS
+
+chmod +x "/opt/\${GAME_SERVICE}-tools/restore-state.sh" \
+  "/opt/\${GAME_SERVICE}-tools/upload-state.sh" \
+  "/opt/\${GAME_SERVICE}-tools/spot-watchdog.sh" \
+  "/opt/\${GAME_SERVICE}-tools/start-server.command"
+
+cat > "/etc/systemd/system/\${GAME_SERVICE}-server.service" <<SERVER_SERVICE
+[Unit]
+Description=\${GAME_NAME} dedicated server
+After=network.target
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=\${GAME_HOME}
+ExecStart=/opt/\${GAME_SERVICE}-tools/start-server.command
+Restart=always
+RestartSec=5
+TimeoutStopSec=120
+ExecStop=/opt/\${GAME_SERVICE}-tools/upload-state.sh
+
+[Install]
+WantedBy=multi-user.target
+SERVER_SERVICE
+
+cat > "/etc/systemd/system/\${GAME_SERVICE}-watchdog.service" <<WATCHDOG_SERVICE
+[Unit]
+Description=Spot interruption watcher for \${GAME_NAME}
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/opt/\${GAME_SERVICE}-tools/spot-watchdog.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+WATCHDOG_SERVICE
+
+cat > "/etc/systemd/system/\${GAME_SERVICE}-backup.service" <<BACKUP_SERVICE
+[Unit]
+Description=\${GAME_NAME} periodic backup
+
+[Service]
+Type=oneshot
+ExecStart=/opt/\${GAME_SERVICE}-tools/upload-state.sh
+BACKUP_SERVICE
+
+cat > "/etc/systemd/system/\${GAME_SERVICE}-backup.timer" <<BACKUP_TIMER
+[Unit]
+Description=\${GAME_NAME} state backup timer
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=\${BACKUP_INTERVAL_MINUTES}min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+BACKUP_TIMER
+
+systemctl daemon-reload
+restore_state
+install_game
+
+systemctl enable "\${GAME_SERVICE}-server.service" "\${GAME_SERVICE}-watchdog.service"
+systemctl start "\${GAME_SERVICE}-server.service"
+systemctl enable --now "\${GAME_SERVICE}-backup.timer"
+
+cat <<INFO
+\${GAME_NAME} Spot instance bootstrap complete.
+Game files: \${GAME_HOME}
+Persistent state directory: \${STATE_DIR_PATH}
+State prefix: \${WORLD_PREFIX}
+INFO
+EOF
+
+RUN_ARGS=(
+  "--region" "$AWS_REGION"
+  "--image-id" "$AMI"
+  "--instance-type" "$INSTANCE_TYPE"
+  "--key-name" "$KEY_NAME"
+  "--subnet-id" "$SUBNET_ID"
+  "--security-group-ids" "${SECURITY_GROUP_ID_ARRAY[@]}"
+  "--count" "1"
+  "--user-data" "file://$TMP_USER_DATA"
+  "--tag-specifications" "ResourceType=instance,Tags=[{Key=Name,Value=${SERVER_NAME}}]"
+  "--instance-market-options" "MarketType=spot,SpotOptions={SpotInstanceType=one-time,InstanceInterruptionBehavior=terminate${MAX_SPOT_PRICE:+,MaxPrice=$MAX_SPOT_PRICE}}"
+  "--block-device-mappings" '[{"DeviceName":"/dev/xvda","Ebs":{"DeleteOnTermination":true,"VolumeSize":'${VOLUME_SIZE_GIB}',"VolumeType":"gp3","Encrypted":true}}]'
+)
+
+RUN_ARGS+=("--iam-instance-profile" "Name=${IAM_INSTANCE_PROFILE}")
+
+INSTANCE_ID="$(
+  "${aws_cmd[@]}" ec2 run-instances "${RUN_ARGS[@]}" \
+    --query "Instances[0].InstanceId" \
+    --output text
+)"
+
+if [[ -z "${INSTANCE_ID}" || "${INSTANCE_ID}" == "None" ]]; then
+  echo "Failed to launch spot instance." >&2
+  exit 1
+fi
+
+STATE_FILE="${STATE_DIR}/${GAME_SERVICE}.state"
+(
+  cat <<STATE
+GAME_NAME=${GAME_NAME}
+GAME_SERVICE=${GAME_SERVICE}
+INSTANCE_ID=${INSTANCE_ID}
+AWS_REGION=${AWS_REGION}
+WORLD_BUCKET=${WORLD_BUCKET}
+S3_PREFIX=${S3_PREFIX}
+SELECTED_INSTANCE_TYPE=${INSTANCE_TYPE}
+STATE
+) > "$STATE_FILE"
+
+cat <<INFO
+Launched Spot instance ${INSTANCE_ID} in ${AWS_REGION}.
+Selected instance type: ${INSTANCE_TYPE}
+State file: ${STATE_FILE}
+Check status: ${aws_cmd[*]} ec2 describe-instances --region ${AWS_REGION} --instance-ids ${INSTANCE_ID}
+INFO

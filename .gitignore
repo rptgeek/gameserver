@@ -1,0 +1,3 @@
+# Local runtime artifacts
+.DS_Store
+scripts/.game-spot/*.state
