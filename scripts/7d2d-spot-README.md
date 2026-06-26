@@ -80,6 +80,13 @@ You can also add profile-level overrides in your shell; any env var in the profi
 ./scripts/start-game-spot.sh 7d2d
 ```
 
+Launch on a specific branch:
+
+```bash
+./scripts/start-game-spot.sh 7d2d --branch latest_experimental
+./scripts/start-game-spot.sh 7d2d --branch public
+```
+
 With custom profile path:
 
 ```bash
@@ -114,6 +121,13 @@ Backward-compatible 7d2d entrypoint:
 ./scripts/start-7d2d-spot.sh --size c7i.2xlarge
 ```
 
+Shortcut aliases for branch selection:
+
+```bash
+./scripts/start-7d2d-spot.sh --branch latest
+./scripts/start-7d2d-spot.sh --branch public
+```
+
 ## Stop
 
 ```bash
@@ -134,5 +148,8 @@ Backward-compatible 7d2d entrypoint:
 
 State sync behavior:
 - Boot restores `s3://$WORLD_BUCKET/$S3_PREFIX/$GAME_NAME/state/` into `$STATE_DIR_PATH`.
-- Server saves state on timer and on Spot interruption.
-- `stop-game-spot.sh` sends an SSM backup command before terminate when possible.
+- Server saves state on timer, on graceful service stop, and on shutdown/Spot notice.
+- `stop-game-spot.sh` sends an in-band SSM backup command before terminate when possible.
+- `STOP_TIMEOUT_SECONDS` can be set (default `15`) to control how long the server is given to stop before hard kill on shutdown.
+
+Note: reclaim events that arrive with no in-VM termination notice are inherently hard to capture perfectly; periodic backups reduce loss, and this now includes shutdown hooks for the server process and OS shutdown path.
