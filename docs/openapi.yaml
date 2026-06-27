@@ -1,0 +1,1052 @@
+openapi: 3.1.0
+info:
+  title: Spot Control Plane API
+  version: 1.0.0
+  description: |
+    API contracts for managing game spot instances, operations, profiles, and saved world presets.
+    This specification aligns to the CLI-backed control plane and supports migration from legacy local state.
+servers:
+  - url: /v1
+    description: API base path
+paths:
+  /instances:
+    post:
+      tags:
+        - instances
+      summary: Start a game instance
+      description: |
+        Starts a game instance for a game profile. Backed by start-game-spot.sh.
+      operationId: startInstance
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StartInstanceRequest"
+      responses:
+        "202":
+          description: Instance start accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StartInstanceResponse"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "502":
+          $ref: "#/components/responses/AWSProviderError"
+      security:
+        - bearerAuth: []
+    get:
+      tags:
+        - instances
+      summary: List instances
+      operationId: listInstances
+      parameters:
+        - name: gameName
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: state
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/InstanceLifecycleState"
+      responses:
+        "200":
+          description: Instance list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/InstanceState"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+      security:
+        - bearerAuth: []
+
+  /instances/{instanceId}:
+    get:
+      tags:
+        - instances
+      summary: Get instance status
+      operationId: getInstance
+      parameters:
+        - $ref: "#/components/parameters/InstanceId"
+      responses:
+        "200":
+          description: Instance state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InstanceState"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+      security:
+        - bearerAuth: []
+
+  /instances/{instanceId}:stop:
+    post:
+      tags:
+        - instances
+      summary: Stop an instance
+      operationId: stopInstance
+      parameters:
+        - $ref: "#/components/parameters/InstanceId"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StopInstanceRequest"
+      responses:
+        "202":
+          description: Stop request accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InstanceOperation"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+      security:
+        - bearerAuth: []
+
+  /operations/{operationId}:
+    get:
+      tags:
+        - operations
+      summary: Get operation status
+      operationId: getOperation
+      parameters:
+        - $ref: "#/components/parameters/OperationId"
+      responses:
+        "200":
+          description: Operation details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InstanceOperation"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+      security:
+        - bearerAuth: []
+
+  /instances/{instanceId}/logs:
+    get:
+      tags:
+        - instances
+      summary: Fetch logs for a running or recent instance
+      operationId: getInstanceLogs
+      parameters:
+        - $ref: "#/components/parameters/InstanceId"
+        - name: source
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/LogSource"
+          description: Select cloud-init or runtime source
+        - name: tail
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 5000
+            default: 120
+      responses:
+        "200":
+          description: Logs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LogBundle"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+      security:
+        - bearerAuth: []
+
+  /games:
+    get:
+      tags:
+        - games
+      summary: List configured games
+      operationId: listGames
+      responses:
+        "200":
+          description: Game list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/GameProfileRef"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+      security:
+        - bearerAuth: []
+
+  /games/{gameName}:
+    get:
+      tags:
+        - games
+      summary: Get game profile reference
+      operationId: getGame
+      parameters:
+        - $ref: "#/components/parameters/GameName"
+      responses:
+        "200":
+          description: Game details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GameProfileRef"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+      security:
+        - bearerAuth: []
+    put:
+      tags:
+        - games
+      summary: Update game profile metadata
+      operationId: updateGameProfile
+      parameters:
+        - $ref: "#/components/parameters/GameName"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GameProfileRef"
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GameProfileRef"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+      security:
+        - bearerAuth: []
+
+  /games/{gameName}/presets:
+    get:
+      tags:
+        - presets
+      summary: List world presets for a game
+      operationId: listWorldPresets
+      parameters:
+        - $ref: "#/components/parameters/GameName"
+        - name: world
+          in: query
+          required: false
+          description: Optional world name filter
+          schema:
+            type: string
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Preset list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorldPresetList"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "404":
+          $ref: "#/components/responses/NotFound"
+      security:
+        - bearerAuth: []
+    post:
+      tags:
+        - presets
+      summary: Create a world preset definition
+      operationId: createWorldPreset
+      parameters:
+        - $ref: "#/components/parameters/GameName"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorldPreset"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorldPreset"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+      security:
+        - bearerAuth: []
+
+  /games/{gameName}/presets/{presetId}:
+    get:
+      tags:
+        - presets
+      summary: Get world preset
+      operationId: getWorldPreset
+      parameters:
+        - $ref: "#/components/parameters/GameName"
+        - name: presetId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: World preset
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorldPreset"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "404":
+          $ref: "#/components/responses/NotFound"
+      security:
+        - bearerAuth: []
+    delete:
+      tags:
+        - presets
+      summary: Delete world preset metadata
+      operationId: deleteWorldPreset
+      parameters:
+        - $ref: "#/components/parameters/GameName"
+        - name: presetId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Deleted
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+      security:
+        - bearerAuth: []
+
+  /games/{gameName}/presets/{presetId}:activate:
+    post:
+      tags:
+        - presets
+      summary: Activate a preset for next start
+      operationId: activateWorldPreset
+      parameters:
+        - $ref: "#/components/parameters/GameName"
+        - name: presetId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorldActivateRequest"
+      responses:
+        "202":
+          description: Preset activation accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InstanceOperation"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+      security:
+        - bearerAuth: []
+
+  /games/{gameName}/worlds:
+    get:
+      tags:
+        - worlds
+      summary: Alias for saved-world presets
+      operationId: listWorlds
+      parameters:
+        - $ref: "#/components/parameters/GameName"
+      responses:
+        "200":
+          description: Saved-world list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorldPresetList"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+      security:
+        - bearerAuth: []
+
+  /games/{gameName}/worlds/{worldId}:
+    get:
+      tags:
+        - worlds
+      summary: Get saved world metadata
+      operationId: getWorld
+      parameters:
+        - $ref: "#/components/parameters/GameName"
+        - name: worldId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Saved world metadata
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorldPreset"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "404":
+          $ref: "#/components/responses/NotFound"
+      security:
+        - bearerAuth: []
+    delete:
+      tags:
+        - worlds
+      summary: Delete a saved world snapshot
+      operationId: deleteWorld
+      parameters:
+        - $ref: "#/components/parameters/GameName"
+        - name: worldId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Deleted
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+      security:
+        - bearerAuth: []
+
+  /games/{gameName}/worlds/{worldId}:restore:
+    post:
+      tags:
+        - worlds
+      summary: Restore a world preset into an instance start
+      operationId: restoreWorld
+      parameters:
+        - $ref: "#/components/parameters/GameName"
+        - name: worldId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorldRestoreRequest"
+      responses:
+        "202":
+          description: Restore accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InstanceOperation"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+      security:
+        - bearerAuth: []
+
+  /games/{gameName}:migrate-legacy:
+    post:
+      tags:
+        - migration
+      summary: Migrate legacy state metadata
+      operationId: migrateLegacyState
+      parameters:
+        - $ref: "#/components/parameters/GameName"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MigrationRequest"
+      responses:
+        "200":
+          description: Migration result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MigrationResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+      security:
+        - bearerAuth: []
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    GameName:
+      name: gameName
+      in: path
+      required: true
+      schema:
+        type: string
+    InstanceId:
+      name: instanceId
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^i-[0-9a-f]+$"
+    OperationId:
+      name: operationId
+      in: path
+      required: true
+      schema:
+        type: string
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      schema:
+        type: string
+  responses:
+    InvalidRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    AuthRequired:
+      description: Authentication failed
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Forbidden:
+      description: Forbidden
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Conflict:
+      description: Conflict
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    AWSProviderError:
+      description: AWS API/SSM call failed
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    RateLimited:
+      description: Too many requests
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+  schemas:
+    ErrorResponse:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          $ref: "#/components/schemas/ErrorBody"
+    ErrorBody:
+      type: object
+      required:
+        - code
+        - message
+      properties:
+        code:
+          type: string
+          enum:
+            - INVALID_INSTANCE_ID
+            - INVALID_REQUEST
+            - INVALID_GAME
+            - AUTH_REQUIRED
+            - FORBIDDEN
+            - INSTANCE_NOT_FOUND
+            - GAME_NOT_FOUND
+            - STATE_CONFLICT
+            - INSTANCE_LIMIT_EXCEEDED
+            - INSTANCE_ALREADY_STOPPING
+            - OPERATION_ALREADY_RUNNING
+            - RESOURCE_STALE
+            - RATE_LIMITED
+            - INTERNAL_ERROR
+            - AWS_PROVIDER_ERROR
+            - SERVICE_BUSY
+            - CLOUD_INIT_TIMEOUT
+            - LEGACY_STATE_NOT_FOUND
+        message:
+          type: string
+        details:
+          type: object
+          additionalProperties: true
+        requestId:
+          type: string
+    GameProfileRef:
+      type: object
+      required:
+        - gameName
+        - profile
+      properties:
+        gameName:
+          type: string
+        profile:
+          type: string
+        region:
+          type: string
+        source:
+          type: string
+        version:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        profilePath:
+          type: string
+        note:
+          type: string
+    InstanceLifecycleState:
+      type: string
+      enum:
+        - NONE
+        - REQUESTED
+        - LAUNCHING_EC2
+        - BOOTSTRAPPING
+        - SERVER_RESTORE
+        - GAME_INSTALLING
+        - SERVER_STARTING
+        - SERVER_ACTIVE
+        - DEGRADED_BACKUP
+        - STOPPING
+        - SPOT_INTERRUPTION
+        - STOPPED
+        - TERMINATED
+        - FAILED
+    OperationState:
+      type: string
+      enum:
+        - accepted
+        - running
+        - succeeded
+        - failed
+        - retrying
+        - cancelled
+        - blocked
+    StartInstanceRequest:
+      type: object
+      required:
+        - gameName
+      properties:
+        gameName:
+          type: string
+        profile:
+          type: string
+        instanceType:
+          type: string
+        region:
+          type: string
+        branch:
+          type: string
+          description: Steam branch override for install
+        allowDuplicate:
+          type: boolean
+          default: false
+        dryRun:
+          type: boolean
+          default: false
+        metadata:
+          type: object
+          properties:
+            ticket:
+              type: string
+            requestedBy:
+              type: string
+        requestId:
+          type: string
+    StartInstanceResponse:
+      type: object
+      required:
+        - operationId
+        - state
+        - gameName
+      properties:
+        operationId:
+          type: string
+        state:
+          type: string
+          enum:
+            - accepted
+            - running
+        gameName:
+          type: string
+        requestedInstanceType:
+          type: string
+        requestId:
+          type: string
+        estimatedAvailabilitySeconds:
+          type: integer
+          minimum: 0
+    StopInstanceRequest:
+      type: object
+      properties:
+        graceful:
+          type: boolean
+          default: true
+        timeoutSeconds:
+          type: integer
+          minimum: 1
+          default: 30
+        force:
+          type: boolean
+          default: false
+        deleteStateFile:
+          type: boolean
+          default: true
+        requestId:
+          type: string
+    InstanceState:
+      type: object
+      required:
+        - instanceId
+        - gameName
+        - state
+        - lifecycleState
+        - awsRegion
+      properties:
+        instanceId:
+          type: string
+        gameName:
+          type: string
+        gameService:
+          type: string
+        awsRegion:
+          type: string
+        state:
+          type: string
+        lifecycleState:
+          $ref: "#/components/schemas/InstanceLifecycleState"
+        publicIp:
+          type: string
+        privateIp:
+          type: string
+        instanceType:
+          type: string
+        availabilityZone:
+          type: string
+        launchTime:
+          type: string
+          format: date-time
+        statusService:
+          type: string
+        selectedInstanceType:
+          type: string
+        s3:
+          $ref: "#/components/schemas/WorldLocation"
+    InstanceOperation:
+      type: object
+      required:
+        - operationId
+        - type
+        - state
+      properties:
+        operationId:
+          type: string
+        type:
+          type: string
+          enum:
+            - start
+            - stop
+            - status
+            - backup
+            - migrate
+            - restore
+            - snapshot
+        targetInstanceId:
+          type: string
+        targetPresetId:
+          type: string
+        gameName:
+          type: string
+        state:
+          $ref: "#/components/schemas/OperationState"
+        errorCode:
+          type: string
+        retryable:
+          type: boolean
+        createdBy:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    LogSource:
+      type: string
+      enum:
+        - cloud-init
+        - runtime
+        - ssm
+        - shutdown-save
+        - backup-timer
+    LogLine:
+      type: object
+      required:
+        - source
+        - timestamp
+        - line
+      properties:
+        source:
+          $ref: "#/components/schemas/LogSource"
+        timestamp:
+          type: string
+          format: date-time
+        line:
+          type: string
+    LogBundle:
+      type: object
+      properties:
+        instanceId:
+          type: string
+        gameName:
+          type: string
+        source:
+          $ref: "#/components/schemas/LogSource"
+        tail:
+          type: integer
+        capturedAt:
+          type: string
+          format: date-time
+        lines:
+          type: array
+          items:
+            $ref: "#/components/schemas/LogLine"
+    LegacyInstanceState:
+      type: object
+      properties:
+        GAME_NAME:
+          type: string
+        GAME_SERVICE:
+          type: string
+        INSTANCE_ID:
+          type: string
+        AWS_REGION:
+          type: string
+        WORLD_BUCKET:
+          type: string
+        S3_PREFIX:
+          type: string
+        SELECTED_INSTANCE_TYPE:
+          type: string
+    WorldLocation:
+      type: object
+      properties:
+        worldBucket:
+          type: string
+        s3Prefix:
+          type: string
+        s3StatePrefix:
+          type: string
+    WorldPreset:
+      type: object
+      required:
+        - id
+        - gameName
+        - worldName
+      properties:
+        id:
+          type: string
+          description: Preset/world identifier
+        gameName:
+          type: string
+        worldName:
+          type: string
+        sourceType:
+          type: string
+          enum:
+            - instance
+            - world
+            - backup
+        sourceInstanceId:
+          type: string
+        createdBy:
+          type: string
+        sourceInstanceState:
+          $ref: "#/components/schemas/InstanceState"
+        region:
+          type: string
+        s3Location:
+          $ref: "#/components/schemas/WorldLocation"
+        tags:
+          type: array
+          items:
+            type: string
+        createdAt:
+          type: string
+          format: date-time
+        lastUsedAt:
+          type: string
+          format: date-time
+        restorePlan:
+          type: string
+          description: Optional profile or startup flags for deterministic restore
+    WorldPresetList:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorldPreset"
+        nextCursor:
+          type: string
+    WorldActivateRequest:
+      type: object
+      required:
+        - instanceType
+      properties:
+        instanceType:
+          type: string
+        region:
+          type: string
+        requestId:
+          type: string
+        allowDuplicate:
+          type: boolean
+          default: false
+    WorldRestoreRequest:
+      type: object
+      required:
+        - action
+        - instanceType
+      properties:
+        action:
+          type: string
+          enum:
+            - start
+            - replace
+            - clone
+        instanceType:
+          type: string
+        region:
+          type: string
+        waitForActive:
+          type: boolean
+          default: false
+        preserveCurrentState:
+          type: boolean
+          default: true
+        requestId:
+          type: string
+    MigrationRequest:
+      type: object
+      properties:
+        source:
+          type: string
+          enum:
+            - auto
+            - legacy-dot7d2d
+            - state-file
+            - none
+          default: auto
+        dryRun:
+          type: boolean
+          default: false
+        requestId:
+          type: string
+    MigrationResponse:
+      type: object
+      properties:
+        gameName:
+          type: string
+        sourceUsed:
+          type: string
+        migrated:
+          type: boolean
+        legacyStateFound:
+          type: boolean
+        notes:
+          type: string
+        operationId:
+          type: string

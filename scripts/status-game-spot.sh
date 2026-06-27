@@ -8,21 +8,46 @@ STATE_DIR="${STATE_DIR:-${SCRIPT_DIR}/.game-spot}"
 usage() {
   cat <<'USAGE'
 Usage:
-  ./status-game-spot.sh [game_name|instance-id] [--lines N] [--cloud-init-lines N]
+  ./status-game-spot.sh [game_name|instance-id] [options]
 
-Examples:
+Options:
+  --profile NAME       Use profile from game-profiles/NAME.env (e.g. 7d2d-east1)
+  --region REGION      AWS region to query (defaults to AWS_REGION/profile region)
+  Examples:
   ./status-game-spot.sh 7d2d
   ./status-game-spot.sh i-0123456789abcdef0
   ./status-game-spot.sh 7d2d --lines 120 --cloud-init-lines 200
+  ./status-game-spot.sh 7d2d --profile 7d2d-east1
+  ./status-game-spot.sh 7d2d --region us-west-2
 USAGE
 }
 
 LOG_LINES="${LOG_LINES:-80}"
 CLOUD_INIT_LINES="${CLOUD_INIT_LINES:-120}"
 TARGET="7d2d"
+PROFILE_OVERRIDE=""
+REGION_OVERRIDE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --profile)
+      if [[ $# -lt 2 ]]; then
+        echo "Missing value for --profile" >&2
+        usage
+        exit 1
+      fi
+      PROFILE_OVERRIDE="$2"
+      shift 2
+      ;;
+    --region)
+      if [[ $# -lt 2 ]]; then
+        echo "Missing value for --region" >&2
+        usage
+        exit 1
+      fi
+      REGION_OVERRIDE="$2"
+      shift 2
+      ;;
     --lines|-l)
       if [[ $# -lt 2 ]]; then
         echo "Missing value for --lines" >&2
@@ -66,6 +91,24 @@ if [[ -n "${AWS_PROFILE:-}" ]]; then
   aws_cmd+=(--profile "$AWS_PROFILE")
 fi
 
+GAME_PROFILES_DIR="${GAME_PROFILES_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/game-profiles}"
+if [[ -n "${PROFILE_OVERRIDE}" ]]; then
+  if [[ -f "$PROFILE_OVERRIDE" ]]; then
+    PROFILE_PATH="$PROFILE_OVERRIDE"
+  else
+    PROFILE_PATH="${GAME_PROFILES_DIR}/${PROFILE_OVERRIDE}.env"
+  fi
+
+  if [[ ! -f "$PROFILE_PATH" ]]; then
+    echo "Profile not found: ${PROFILE_PATH}" >&2
+    exit 1
+  fi
+
+  set -a
+  . "$PROFILE_PATH"
+  set +a
+fi
+
 GAME_NAME=""
 INSTANCE_ID=""
 
@@ -106,7 +149,7 @@ REGION_ARGS=(--region "$REGION")
 echo "=== EC2 instance status (${INSTANCE_ID}) ==="
 "${aws_cmd[@]}" "${REGION_ARGS[@]}" ec2 describe-instances \
   --instance-ids "$INSTANCE_ID" \
-  --query "Reservations[].Instances[].{Id:InstanceId,State:State.Name,PublicIp:PublicIpAddress,PrivateIp:PrivateIpAddress,Type:InstanceType,AZ:Placement.AvailabilityZone,LaunchTime:LaunchTime}" \
+  --query "Reservations[].Instances[].{Id:InstanceId,State:State.Name,PublicIp:PublicIpAddress,PrivateIp:PrivateIpAddress,Type:InstanceType,AZ:Placement.AvailabilityZone,LaunchTime:LaunchTime,SecurityGroups:join('; ', SecurityGroups[].GroupId)}" \
   --output table
 
 INSTANCE_STATE="$(

@@ -83,11 +83,35 @@ INSTANCE_STATE="$( \
 if [[ -n "${GAME_NAME:-}" && ( "${INSTANCE_STATE}" == "running" || "${INSTANCE_STATE}" == "pending" ) ]]; then
   UPLOAD_COMMAND="/opt/${GAME_SERVICE}-tools/upload-state.sh"
   echo "Requesting in-band backup on ${INSTANCE_ID} via SSM."
-  "${aws_cmd[@]}" "${REGION_ARGS[@]}" ssm send-command \
+  COMMAND_ID="$("${aws_cmd[@]}" "${REGION_ARGS[@]}" ssm send-command \
     --document-name AWS-RunShellScript \
     --instance-ids "$INSTANCE_ID" \
     --comment "${GAME_NAME} graceful backup before stop" \
-    --parameters commands="[\"${UPLOAD_COMMAND}\"]" >/tmp/game-spot-stop-cmd.out 2>&1 || true
+    --parameters commands="[\"${UPLOAD_COMMAND}\"]" \
+    --query "Command.CommandId" \
+    --output text
+    )"
+  COMMAND_ID="${COMMAND_ID:-}"
+
+  if [[ -n "${COMMAND_ID}" && "${COMMAND_ID}" != "None" ]]; then
+    echo "Backup command submitted: ${COMMAND_ID}"
+    for _ in $(seq 1 20); do
+      UPLOAD_STATUS="$("${aws_cmd[@]}" "${REGION_ARGS[@]}" ssm get-command-invocation \
+        --command-id "$COMMAND_ID" \
+        --instance-id "$INSTANCE_ID" \
+        --query Status \
+        --output text 2>/dev/null || true)"
+      if [[ "$UPLOAD_STATUS" == "Success" || "$UPLOAD_STATUS" == "Failed" || "$UPLOAD_STATUS" == "Cancelled" || "$UPLOAD_STATUS" == "TimedOut" ]]; then
+        break
+      fi
+      sleep 2
+    done
+    if [[ -n "${UPLOAD_STATUS:-}" && "${UPLOAD_STATUS}" != "Success" ]]; then
+      echo "In-band backup finished with status: ${UPLOAD_STATUS:-unknown}" >&2
+    else
+      echo "In-band backup completed."
+    fi
+  fi
 fi
 
 echo "Terminating ${INSTANCE_ID}."

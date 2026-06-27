@@ -1,0 +1,13 @@
+<ServerSettings>
+  <property name="ServerName" value="7d2d Spot" />
+  <property name="ServerPassword" value="" />
+  <property name="ServerMaxPlayerCount" value="8" />
+  <property name="ServerPort" value="26900" />
+  <property name="GameWorld" value="Navezgane" />
+  <property name="GameName" value="7d2d" />
+  <property name="BloodMoonFrequency" value="7" />
+  <property name="BloodMoonRange" value="2" />
+  <property name="DropOnDeath" value="2" />
+  <property name="PlayerKillingMode" value="2" />
+  <property name="AirDropMarker" value="true" />
+</ServerSettings>

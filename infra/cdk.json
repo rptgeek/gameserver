@@ -1,0 +1,40 @@
+{
+  "app": "npx ts-node --prefer-ts-exts --transpile-only bin/infra.ts",
+  "watch": {
+    "include": [
+      "bin/**/*.ts",
+      "lib/**/*.ts"
+    ],
+    "exclude": [
+      "README.md",
+      "cdk.out",
+      "node_modules"
+    ]
+  },
+  "context": {
+    "stage": "dev",
+    "projectName": "7d2d",
+    "cognitoDomainPrefix": "7d2d-dev-auth",
+    "frontendDomainName": "frontend.example.com",
+    "apiDomainName": "api.example.com",
+    "backendImage": "public.ecr.aws/docker/library/nginx:alpine",
+    "backendContainerPort": 80,
+    "backendCpu": 256,
+    "backendMemoryMiB": 512,
+    "backendDesiredCount": 1,
+    "backendHealthCheckPath": "/health",
+    "apiAllowedOrigins": [
+      "http://localhost:3000",
+      "http://localhost:5173",
+      "https://frontend.example.com"
+    ],
+    "cognitoCallbackUrls": [
+      "https://frontend.example.com/auth/callback",
+      "http://localhost:3000/auth/callback"
+    ],
+    "cognitoLogoutUrls": [
+      "https://frontend.example.com/",
+      "http://localhost:3000/"
+    ]
+  }
+}
