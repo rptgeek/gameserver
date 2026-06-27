@@ -3,16 +3,19 @@ import * as cdk from 'aws-cdk-lib';
 import * as apigateway from 'aws-cdk-lib/aws-apigatewayv2';
 import * as apigatewayAuthorizers from 'aws-cdk-lib/aws-apigatewayv2-authorizers';
 import * as apigatewayIntegrations from 'aws-cdk-lib/aws-apigatewayv2-integrations';
+import * as events from 'aws-cdk-lib/aws-events';
+import * as eventsTargets from 'aws-cdk-lib/aws-events-targets';
 import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
 import * as cloudfrontOrigins from 'aws-cdk-lib/aws-cloudfront-origins';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as ecs from 'aws-cdk-lib/aws-ecs';
-import * as ecsPatterns from 'aws-cdk-lib/aws-ecs-patterns';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as s3 from 'aws-cdk-lib/aws-s3';
+import * as ssm from 'aws-cdk-lib/aws-ssm';
 
 export interface PlatformInfraStackProps extends cdk.StackProps {
   readonly stage: string;
@@ -66,7 +69,14 @@ export class PlatformInfraStack extends cdk.Stack {
     const vpc = new ec2.Vpc(this, 'VPC', {
       vpcName: `${prefix}-vpc`,
       maxAzs: 2,
-      natGateways: 1,
+      natGateways: 0,
+      subnetConfiguration: [
+        {
+          cidrMask: 18,
+          name: 'Public',
+          subnetType: ec2.SubnetType.PUBLIC,
+        },
+      ],
     });
 
     const cluster = new ecs.Cluster(this, 'BackendCluster', {
@@ -98,13 +108,13 @@ export class PlatformInfraStack extends cdk.Stack {
         userPassword: true,
         userSrp: true,
       },
-      oauth: {
+      oAuth: {
         callbackUrls,
         logoutUrls,
         flows: {
           authorizationCodeGrant: true,
         },
-        scopes: [cognito.OAuthScope.COGNITO_OPENID, cognito.OAuthScope.EMAIL, cognito.OAuthScope.PROFILE],
+        scopes: [cognito.OAuthScope.OPENID, cognito.OAuthScope.EMAIL, cognito.OAuthScope.PROFILE],
       },
     });
 
@@ -256,6 +266,22 @@ export class PlatformInfraStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
+    const backendServiceSecurityGroup = new ec2.SecurityGroup(this, 'BackendServiceSecurityGroup', {
+      vpc,
+      description: `${prefix} backend service security group`,
+      allowAllOutbound: true,
+    });
+
+    const backendServicePort = props.backendContainerPort ?? 80;
+    backendServiceSecurityGroup.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(backendServicePort), 'Allow backend traffic');
+
+    const backendTaskDefinition = new ecs.FargateTaskDefinition(this, 'BackendTaskDefinition', {
+      cpu: props.backendCpu ?? 256,
+      memoryLimitMiB: props.backendMemoryMiB ?? 512,
+      executionRole: backendExecutionRole,
+      taskRole: backendTaskRole,
+    });
+
     const backendPort = props.backendContainerPort ?? 80;
     const backendHealthCheckPath = props.backendHealthCheckPath ?? '/health';
     const backendEnv = {
@@ -276,50 +302,203 @@ export class PlatformInfraStack extends cdk.Stack {
       ...(props.backendEnvironment ?? {}),
     };
 
-    const backendService = new ecsPatterns.ApplicationLoadBalancedFargateService(
-      this,
-      'BackendService',
-      {
-        cluster,
-        desiredCount: props.backendDesiredCount ?? 1,
-        cpu: props.backendCpu ?? 256,
-        memoryLimitMiB: props.backendMemoryMiB ?? 512,
-        listenerPort: 80,
-        publicLoadBalancer: true,
-        taskImageOptions: {
-          image: ecs.ContainerImage.fromRegistry(
-            props.backendImage ?? 'public.ecr.aws/docker/library/nginx:alpine',
-          ),
-          containerName: `${prefix}-backend`,
-          containerPort: backendPort,
-          environment: backendEnv,
-          enableLogging: true,
-          executionRole: backendExecutionRole,
-          taskRole: backendTaskRole,
-          logDriver: ecs.LogDrivers.awsLogs({
-            logGroup: backendLogGroup,
-            streamPrefix: 'backend',
-          }),
-        },
+    const backendContainer = backendTaskDefinition.addContainer('BackendContainer', {
+      image: ecs.ContainerImage.fromRegistry(props.backendImage ?? 'public.ecr.aws/docker/library/nginx:alpine'),
+      containerName: `${prefix}-backend`,
+      environment: backendEnv,
+      logging: ecs.LogDrivers.awsLogs({
+        logGroup: backendLogGroup,
+        streamPrefix: 'backend',
+      }),
+      healthCheck: {
+        command: ['CMD-SHELL', `curl -fsS http://127.0.0.1:${backendPort}${backendHealthCheckPath} || exit 1`],
+        interval: cdk.Duration.seconds(30),
+        timeout: cdk.Duration.seconds(5),
+        startPeriod: cdk.Duration.seconds(10),
+        retries: 3,
       },
+    });
+    backendContainer.addPortMappings({
+      containerPort: backendServicePort,
+      protocol: ecs.Protocol.TCP,
+    });
+
+    new ecs.FargateService(this, 'BackendService', {
+      cluster,
+      taskDefinition: backendTaskDefinition,
+      desiredCount: props.backendDesiredCount ?? 1,
+      assignPublicIp: true,
+      vpcSubnets: {
+        subnetType: ec2.SubnetType.PUBLIC,
+      },
+      securityGroups: [backendServiceSecurityGroup],
+    });
+
+    const backendEndpointParameter = new ssm.StringParameter(this, 'BackendEndpointParameter', {
+      parameterName: `/${prefix}/${cdk.Stack.of(this).stackName}/backend/endpoint`,
+      stringValue: 'UNAVAILABLE',
+      description: 'Current backend public endpoint for API proxy integration',
+    });
+
+    const endpointUpdater = new lambda.Function(this, 'BackendEndpointUpdater', {
+      runtime: lambda.Runtime.NODEJS_20_X,
+      handler: 'index.handler',
+      timeout: cdk.Duration.seconds(30),
+      environment: {
+        BACKEND_ENDPOINT_PARAM: backendEndpointParameter.parameterName,
+        BACKEND_PORT: backendPort.toString(),
+      },
+      code: lambda.Code.fromInline(`
+const AWS = require('aws-sdk');
+const ecs = new AWS.ECS();
+const ec2 = new AWS.EC2();
+const ssm = new AWS.SSM();
+
+exports.handler = async (event) => {
+  const detail = event.detail || {};
+  const taskArn = detail.taskArn;
+  const clusterArn = detail.clusterArn;
+  const status = detail.lastStatus || '';
+
+  if (!taskArn || !clusterArn) return;
+
+  if (status === 'STOPPED') {
+    await ssm.putParameter({
+      Name: process.env.BACKEND_ENDPOINT_PARAM,
+      Value: 'UNAVAILABLE',
+      Type: 'String',
+      Overwrite: true,
+    }).promise();
+    return;
+  }
+
+  if (status !== 'RUNNING') return;
+
+  const describe = await ecs.describeTasks({ tasks: [taskArn], cluster: clusterArn }).promise();
+  const task = describe.tasks && describe.tasks[0];
+  if (!task) return;
+
+  const eniAttachment = (task.attachments || []).flatMap((attachment) => attachment.details || []).find(
+    (detail) => detail.name === 'networkInterfaceId',
+  );
+  const networkInterfaceId = eniAttachment && eniAttachment.value;
+  if (!networkInterfaceId) return;
+
+  const interfaces = await ec2.describeNetworkInterfaces({
+    NetworkInterfaceIds: [networkInterfaceId],
+  }).promise();
+  const association = interfaces.NetworkInterfaces && interfaces.NetworkInterfaces[0] && interfaces.NetworkInterfaces[0].Association;
+  const publicIp = association && association.PublicIp;
+  if (!publicIp) return;
+
+      const endpoint = 'http://' + publicIp + ':' + process.env.BACKEND_PORT;
+  await ssm.putParameter({
+    Name: process.env.BACKEND_ENDPOINT_PARAM,
+    Value: endpoint,
+    Type: 'String',
+    Overwrite: true,
+  }).promise();
+};
+      `),
+    });
+
+    backendEndpointParameter.grantWrite(endpointUpdater);
+    endpointUpdater.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['ecs:DescribeTasks', 'ec2:DescribeNetworkInterfaces'],
+        resources: ['*'],
+      }),
     );
 
-    backendService.targetGroup.configureHealthCheck({
-      path: backendHealthCheckPath,
-      healthyHttpCodes: '200-399',
-      interval: cdk.Duration.seconds(30),
-      timeout: cdk.Duration.seconds(5),
-      healthyThresholdCount: 2,
-      unhealthyThresholdCount: 3,
+    new events.Rule(this, 'BackendTaskStateChangeRule', {
+      description: 'Track backend ECS task state and publish public endpoint to SSM',
+      eventPattern: {
+        source: ['aws.ecs'],
+        detailType: ['ECS Task State Change'],
+        detail: {
+          clusterArn: [cluster.clusterArn],
+          lastStatus: ['RUNNING', 'STOPPED'],
+        },
+      },
+      targets: [new eventsTargets.LambdaFunction(endpointUpdater)],
     });
-    backendService.loadBalancer.setAttribute('idle_timeout.timeout_seconds', '3600');
+
+    const backendProxy = new lambda.Function(this, 'BackendApiProxy', {
+      runtime: lambda.Runtime.NODEJS_20_X,
+      handler: 'index.handler',
+      timeout: cdk.Duration.seconds(30),
+      environment: {
+        BACKEND_ENDPOINT_PARAM: backendEndpointParameter.parameterName,
+      },
+      code: lambda.Code.fromInline(`
+const AWS = require('aws-sdk');
+const ssm = new AWS.SSM();
+
+async function getBackendEndpoint() {
+  const response = await ssm
+    .getParameter({ Name: process.env.BACKEND_ENDPOINT_PARAM, WithDecryption: false })
+    .promise();
+  const value = response.Parameter && response.Parameter.Value;
+  if (!value || value === 'UNAVAILABLE') return null;
+  return value;
+}
+
+exports.handler = async (event) => {
+  const endpoint = await getBackendEndpoint();
+  if (!endpoint) {
+    return {
+      statusCode: 503,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ error: 'backend endpoint not ready' }),
+    };
+  }
+
+  const requestPath = (event.rawPath || '/');
+  const query = event.rawQueryString ? '?' + event.rawQueryString : '';
+  const url = endpoint + requestPath + query;
+  const method = event.requestContext?.http?.method || 'GET';
+  const requestHeaders = { ...(event.headers || {}) };
+  delete requestHeaders.host;
+  const body = event.isBase64Encoded ? Buffer.from(event.body || '', 'base64').toString('utf8') : event.body;
+
+  try {
+    const response = await fetch(url, {
+      method,
+      headers: requestHeaders,
+      body,
+    });
+
+    const responseText = await response.text();
+    const responseHeaders = {};
+    response.headers.forEach((value, key) => {
+      responseHeaders[key] = value;
+    });
+
+    return {
+      statusCode: response.status,
+      headers: responseHeaders,
+      body: responseText,
+      isBase64Encoded: false,
+    };
+  } catch (error) {
+    console.error(error);
+    return {
+      statusCode: 503,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ error: 'backend not reachable' }),
+      isBase64Encoded: false,
+    };
+  }
+};
+      `),
+    });
+
+    backendEndpointParameter.grantRead(backendProxy);
 
     const s3Bucket = new s3.Bucket(this, 'FrontendBucket', {
       bucketName: `${toSafePrefix(prefix)}-frontend-${cdk.Stack.of(this).account}`,
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       encryption: s3.BucketEncryption.S3_MANAGED,
-      websiteIndexDocument: 'index.html',
-      websiteErrorDocument: 'index.html',
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       autoDeleteObjects: true,
     });
@@ -373,12 +552,11 @@ export class PlatformInfraStack extends cdk.Stack {
       },
     );
 
-    const backendIntegration = new apigatewayIntegrations.HttpUrlIntegration(
+    const backendIntegration = new apigatewayIntegrations.HttpLambdaIntegration(
       `${prefix}-backend-integration`,
-      `http://${backendService.loadBalancer.loadBalancerDnsName}`,
+      backendProxy,
       {
-        method: apigateway.HttpMethod.ANY,
-        payloadFormatVersion: apigateway.PayloadFormatVersion.VERSION_1_0,
+        payloadFormatVersion: apigateway.PayloadFormatVersion.VERSION_2_0,
       },
     );
 

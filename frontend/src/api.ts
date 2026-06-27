@@ -15,6 +15,7 @@ const env = (import.meta as { env: Env }).env;
 const API_BASE_URL = (env.VITE_API_BASE_URL || '/api').replace(/\/+$/, '');
 
 type Query = Record<string, string | undefined>;
+type GetOperationApiResponse = OperationResult | { operation: OperationResult };
 
 function toUrl(path: string, query?: Query): string {
   const params = new URLSearchParams();
@@ -139,7 +140,6 @@ function logsFromPayload(payload: unknown): LogsResponse {
     });
   }
 
-  const lines = (linesRaw as unknown[]).map((item) => {
   const lines = Array.isArray(linesRaw)
     ? (linesRaw as unknown[]).map((item) => {
         if (typeof item === 'string') {
@@ -161,8 +161,6 @@ function logsFromPayload(payload: unknown): LogsResponse {
   const nextToken = typeof mapPayload.nextToken === 'string' ? mapPayload.nextToken : typeof mapPayload.next_token === 'string' ? mapPayload.next_token : undefined;
   return { lines, nextToken };
 }
-
-type GetOperationApiResponse = OperationResult | { operation: OperationResult };
 
 function normalizeGame(item: { id?: unknown; gameId?: unknown; name?: unknown; title?: unknown }): Game {
   const id =
