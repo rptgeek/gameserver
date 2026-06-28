@@ -71,7 +71,7 @@ GAME_NAME=7d2d
 SUBNET_ID=subnet-xxxxxxxx
 SECURITY_GROUP_IDS="sg-xxxxxxxx sg-yyyyyyyy"
 KEY_NAME=my-keypair
-IAM_INSTANCE_PROFILE=7d2d-ec2-role
+IAM_INSTANCE_PROFILE=example-game-server-role
 GAME_INSTALL_CMD="/opt/steamcmd/steamcmd.sh +login anonymous +force_install_dir /opt/7d2d +app_update 294420 validate +quit"
 GAME_START_CMD="cd /opt/7d2d && ./7DaysToDieServer.x86_64 -logfile /var/log/7d2d/server.log -configfile=serverconfig.xml -batchmode -nographics -dedicated"
 ```
@@ -100,7 +100,7 @@ The script syncs `${GAMECONFIG_S3_KEY}` into `${GAMECONFIG_LOCAL_PATH}` on start
 You can update the S3 config file directly and next launch will pick it up:
 
 ```bash
-aws s3 cp scripts/configs/7d2d/serverconfig.xml s3://7d2d-state-prod/servers/7d2d/config/serverconfig.xml
+aws s3 cp scripts/configs/7d2d/serverconfig.xml s3://gameserver-state-example/servers/7d2d/config/serverconfig.xml
 ```
 
 You can also add profile-level overrides in your shell; any env var in the profile can be overridden at runtime.
@@ -172,18 +172,18 @@ Shortcut aliases for 7d2d branch selection:
 Edit `scripts/game-profiles/windrose.env` to set your Windrose profile values:
 
 ```bash
-WORLD_BUCKET=7d2d-state-prod
+WORLD_BUCKET=gameserver-state-example
 S3_PREFIX=servers
 GAME_NAME=windrose
 AWS_REGION=us-east-1
-AMI_ID=ami-0d7405d05f836d0d4
-SUBNET_ID=subnet-0a5490a61e91eda0f
-SECURITY_GROUP_IDS="sg-0caca827ece0684c1"
+AMI_ID=ami-xxxxxxxxxxxxxxxxx
+SUBNET_ID=subnet-xxxxxxxxxxxxxxxxx
+SECURITY_GROUP_IDS="sg-xxxxxxxxxxxxxxxxx"
 GAME_UDP_PORTS="27015"
 GAME_TCP_PORTS="27015,80"
 GAME_INGRESS_CIDR="0.0.0.0/0"
-KEY_NAME=jajoga
-IAM_INSTANCE_PROFILE=7d2d-ec2-role
+KEY_NAME=example-key
+IAM_INSTANCE_PROFILE=example-game-server-role
 DEFAULT_INSTANCE_TYPE=c7i.xlarge
 GAME_INSTALL_CMD='/opt/steamcmd/steamcmd.sh +@sSteamCmdForcePlatformType linux +force_install_dir /opt/windrose +login anonymous +app_update 4129620 validate +quit'
 GAME_START_CMD="cd /opt/windrose && ./WindroseServer.x86_64 -logfile /var/log/windrose/server.log -batchmode -nographics -dedicated"

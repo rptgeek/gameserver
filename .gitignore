@@ -5,6 +5,11 @@ scripts/.game-spot/*.state
 # Dependencies
 node_modules/
 
+# Local frontend environment values
+frontend/.env
+frontend/.env.local
+frontend/.env.production
+
 # Build output
 dist/
 frontend/dist/

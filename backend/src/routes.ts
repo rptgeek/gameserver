@@ -675,7 +675,7 @@ async function resolveWorldConfigLocation(
   const launchProfile = profiles.find(hasLaunchSettings) || profiles[0];
   const basePrefix = launchProfile?.s3Prefix || "servers";
   const worldPrefix = world.worldPrefix || canonicalWorldPrefix(basePrefix, gameId, world.worldId);
-  const bucket = launchProfile?.worldBucket || "7d2d-state-prod";
+  const bucket = launchProfile?.worldBucket || "gameserver-state-example";
   const key = worldConfigKey(worldPrefix);
   const fallbackKeys = [
     launchProfile?.gameConfigS3Key,
@@ -1246,7 +1246,7 @@ async function createInstancesForSpec(
   const worldLabel = selectedWorld?.name || spec.worldName || worldSuffix;
 
   const bootstrapProfile = {
-    worldBucket: profile.worldBucket || "7d2d-state-prod",
+    worldBucket: profile.worldBucket || "gameserver-state-example",
     worldBucketRegion: profile.worldBucketRegion || config.awsRegion,
     worldPrefix,
     s3Prefix: basePrefixSafe,

@@ -112,7 +112,7 @@ All errors return:
   "GAME_SERVICE": "7d2d",
   "INSTANCE_ID": "i-0123456789abcdef0",
   "AWS_REGION": "us-east-1",
-  "WORLD_BUCKET": "7d2d-state-prod",
+  "WORLD_BUCKET": "gameserver-state-example",
   "S3_PREFIX": "servers",
   "SELECTED_INSTANCE_TYPE": "c7i.xlarge"
 }

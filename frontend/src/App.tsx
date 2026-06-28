@@ -135,7 +135,7 @@ function worldBucket(world: WorldPreset, profiles: GameProfile[]): string {
     return explicit;
   }
   const profileBucket = profiles.find((profile) => typeof profile.worldBucket === 'string')?.worldBucket;
-  return typeof profileBucket === 'string' ? profileBucket : '7d2d-state-prod';
+  return typeof profileBucket === 'string' ? profileBucket : 'gameserver-state-example';
 }
 
 function playerSummary(status?: PlayerStatus): string {
