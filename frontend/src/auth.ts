@@ -85,16 +85,7 @@ export async function signOut() {
 export async function getCurrentUserProfile(): Promise<AuthUser | null> {
   await initializeAuth();
   if (!cognitoConfigured()) {
-    const fallbackToken = localStorage.getItem('id_token');
-    if (!fallbackToken) {
-      return null;
-    }
-    return {
-      username: 'dev-user',
-      userId: 'dev-user',
-      email: 'dev-user@example.com',
-      displayName: 'Developer',
-    };
+    return null;
   }
 
   try {
@@ -125,8 +116,7 @@ export async function getAuthToken(): Promise<string | null> {
   }
 
   if (!cognitoConfigured()) {
-    const token = localStorage.getItem('id_token');
-    return token || null;
+    return null;
   }
 
   try {
@@ -145,4 +135,3 @@ export async function getAuthToken(): Promise<string | null> {
 
   return null;
 }
-
