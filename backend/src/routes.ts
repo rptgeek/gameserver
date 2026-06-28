@@ -288,8 +288,11 @@ function withLaunchSettings(
     return selectedProfile;
   }
 
-  const launchProfile = [...profiles]
-    .filter(hasLaunchSettings)
+  const launchProfiles = [...profiles].filter(hasLaunchSettings);
+  const sameRegionProfiles = launchProfiles.filter(
+    (profile) => !profile.worldBucketRegion || profile.worldBucketRegion === config.awsRegion,
+  );
+  const launchProfile = (sameRegionProfiles.length > 0 ? sameRegionProfiles : launchProfiles)
     .sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""))[0];
 
   if (!launchProfile) {
@@ -772,7 +775,14 @@ async function createInstancesForSpec(
     const sortedProfiles = [...allProfiles].sort(
       (a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""),
     );
-    selectedProfile = sortedProfiles.find(hasLaunchSettings) ?? sortedProfiles[0];
+    selectedProfile =
+      sortedProfiles.find(
+        (profile) =>
+          hasLaunchSettings(profile) &&
+          (!profile.worldBucketRegion || profile.worldBucketRegion === config.awsRegion),
+      ) ??
+      sortedProfiles.find(hasLaunchSettings) ??
+      sortedProfiles[0];
   }
 
   if (!selectedProfile) {
