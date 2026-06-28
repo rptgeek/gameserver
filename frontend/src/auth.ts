@@ -15,8 +15,9 @@ const COGNITO_USER_POOL_ID = env.VITE_COGNITO_USER_POOL_ID;
 const COGNITO_USER_POOL_CLIENT_ID = env.VITE_COGNITO_USER_POOL_CLIENT_ID;
 const COGNITO_REGION = env.VITE_COGNITO_REGION;
 const COGNITO_DOMAIN = env.VITE_COGNITO_DOMAIN;
-const OAUTH_SIGN_IN = env.VITE_COGNITO_REDIRECT_SIGN_IN || window.location.origin;
-const OAUTH_SIGN_OUT = env.VITE_COGNITO_REDIRECT_SIGN_OUT || window.location.origin;
+const ensureTrailingSlash = (value: string) => (value.endsWith('/') ? value : `${value}/`);
+const OAUTH_SIGN_IN = ensureTrailingSlash(env.VITE_COGNITO_REDIRECT_SIGN_IN || window.location.origin);
+const OAUTH_SIGN_OUT = ensureTrailingSlash(env.VITE_COGNITO_REDIRECT_SIGN_OUT || window.location.origin);
 const OAUTH_SCOPES = (env.VITE_COGNITO_OAUTH_SCOPES || 'openid email profile')
   .split(',')
   .map((scope) => scope.trim())
