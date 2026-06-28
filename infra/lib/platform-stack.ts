@@ -261,7 +261,7 @@ export class PlatformInfraStack extends cdk.Stack {
       }),
     );
 
-    const bootstrapDocument = new ssm.CfnDocument(this, '7d2dBootstrapDocument', {
+    new ssm.CfnDocument(this, '7d2dBootstrapDocument', {
       documentType: 'Command',
       name: bootstrapDocumentName,
       content: {
@@ -286,7 +286,7 @@ export class PlatformInfraStack extends cdk.Stack {
       },
     });
 
-    const updateDocument = new ssm.CfnDocument(this, '7d2dUpdateDocument', {
+    new ssm.CfnDocument(this, '7d2dUpdateDocument', {
       documentType: 'Command',
       name: updateDocumentName,
       content: {
@@ -311,7 +311,7 @@ export class PlatformInfraStack extends cdk.Stack {
       },
     });
 
-    const backupDocument = new ssm.CfnDocument(this, '7d2dBackupDocument', {
+    new ssm.CfnDocument(this, '7d2dBackupDocument', {
       documentType: 'Command',
       name: backupDocumentName,
       content: {

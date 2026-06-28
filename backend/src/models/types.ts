@@ -117,7 +117,7 @@ export interface InstanceItem {
 export interface OperationItem {
   pk: string;
   operationId: string;
-  action: "create" | "start" | "stop" | "restart" | "terminate" | "reboot" | "bootstrap" | "update" | "config-update" | "log-stream";
+  action: "create" | "start" | "stop" | "restart" | "terminate" | "reboot" | "bootstrap" | "update" | "config-update" | "log-stream" | "server-start" | "server-stop" | "server-restart" | "server-command";
   instanceIds: string[];
   status: "queued" | "running" | "succeeded" | "failed";
   createdAt: string;

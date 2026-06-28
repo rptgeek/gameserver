@@ -100,8 +100,19 @@ body {
 .dashboard-grid {
   padding: 0 1rem 2rem;
   display: grid;
-  grid-template-columns: repeat(2, minmax(320px, 1fr));
+  grid-template-columns: minmax(320px, 420px) minmax(0, 1fr);
   gap: 1rem;
+  align-items: start;
+}
+
+.dashboard-grid.saved-worlds-collapsed {
+  grid-template-columns: 64px minmax(0, 1fr);
+}
+
+.main-workspace {
+  display: grid;
+  gap: 1rem;
+  min-width: 0;
 }
 
 .panel {
@@ -225,6 +236,34 @@ textarea {
   border-radius: 14px;
   padding: 0.9rem;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+
+.panel-collapsed {
+  padding: 0.45rem;
+  min-height: 520px;
+}
+
+.collapsed-panel-toggle {
+  width: 100%;
+  min-height: 500px;
+  border: 1px dashed rgba(127, 154, 255, 0.28);
+  border-radius: 12px;
+  background: rgba(7, 12, 31, 0.42);
+  color: #d6e0ff;
+  padding: 0.85rem 0.45rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  cursor: pointer;
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+}
+
+.collapsed-panel-toggle span {
+  color: var(--muted);
+  font-size: 0.86rem;
 }
 
 .world-card-head {
@@ -385,6 +424,11 @@ tbody tr:hover {
   flex-wrap: wrap;
 }
 
+.log-filter-note {
+  font-size: 0.78rem;
+  color: #9fb2ff;
+}
+
 .log-output {
   min-height: 360px;
   background: #050917;
@@ -401,6 +445,25 @@ tbody tr:hover {
 .config-panel {
   display: grid;
   gap: 0.65rem;
+}
+
+.console-panel {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.console-command-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.6rem;
+}
+
+.console-command-row input {
+  border-radius: 10px;
+  border: 1px solid rgba(127, 154, 255, 0.26);
+  background: #040b1d;
+  color: #d6e0ff;
+  padding: 0.72rem 0.85rem;
 }
 
 .json-editor {
@@ -531,6 +594,18 @@ tbody tr:hover {
 @media (max-width: 980px) {
   .dashboard-grid {
     grid-template-columns: 1fr;
+  }
+  .dashboard-grid.saved-worlds-collapsed {
+    grid-template-columns: 1fr;
+  }
+  .panel-collapsed {
+    min-height: auto;
+  }
+  .collapsed-panel-toggle {
+    min-height: auto;
+    writing-mode: horizontal-tb;
+    flex-direction: row;
+    padding: 0.65rem 0.85rem;
   }
   .top-bar,
   .panel,

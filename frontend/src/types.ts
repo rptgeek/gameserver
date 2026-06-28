@@ -50,6 +50,7 @@ export interface PlayerStatus {
   playerCount: number;
   players: string[];
   lastUpdatedAt?: string;
+  serverVersion?: string;
 }
 
 export interface ServerInstance {
@@ -74,6 +75,14 @@ export interface OperationResult {
   operationId: string;
   status?: string;
   message?: string;
+  commandId?: string;
+  error?: string;
+  payload?: {
+    output?: string;
+    commandStatus?: string;
+    responseCode?: number;
+    [key: string]: unknown;
+  };
 }
 
 export interface LogsResponse {

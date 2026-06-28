@@ -89,7 +89,18 @@ async function request<T>(path: string, init: RequestInit = {}, query?: Query): 
   };
 
   if (!response.ok) {
-    const msg = text || response.statusText;
+    let msg = text || response.statusText;
+    try {
+      const parsed = text ? JSON.parse(text) : undefined;
+      if (parsed && typeof parsed === 'object') {
+        const error = (parsed as { error?: unknown; message?: unknown; details?: unknown }).error;
+        const message = (parsed as { error?: unknown; message?: unknown; details?: unknown }).message;
+        const details = (parsed as { error?: unknown; message?: unknown; details?: unknown }).details;
+        msg = [error, message, details].filter((value) => typeof value === 'string' && value).join(': ') || msg;
+      }
+    } catch {
+      // keep raw text/status
+    }
     throw new Error(msg || 'Request failed');
   }
 
@@ -361,6 +372,43 @@ async function triggerInstanceAction(
   const res = await request<OperationResult | unknown>(`/v1/instances/${encodeURIComponent(instanceId)}/action`, {
     method: 'POST',
     body: { action },
+  });
+  const operationId = operationIdFromPayload(res);
+  return typeof res === 'object' && res !== null && 'operationId' in res
+    ? (res as OperationResult)
+    : { operationId, status: 'STARTING' };
+}
+
+async function triggerServerAction(
+  instanceId: string,
+  action: 'server-start' | 'server-stop' | 'server-restart',
+): Promise<OperationResult> {
+  const res = await request<OperationResult | unknown>(`/v1/instances/${encodeURIComponent(instanceId)}/server-action`, {
+    method: 'POST',
+    body: { action },
+  });
+  const operationId = operationIdFromPayload(res);
+  return typeof res === 'object' && res !== null && 'operationId' in res
+    ? (res as OperationResult)
+    : { operationId, status: 'STARTING' };
+}
+
+export async function startGameServer(instanceId: string): Promise<OperationResult> {
+  return triggerServerAction(instanceId, 'server-start');
+}
+
+export async function stopGameServer(instanceId: string): Promise<OperationResult> {
+  return triggerServerAction(instanceId, 'server-stop');
+}
+
+export async function restartGameServer(instanceId: string): Promise<OperationResult> {
+  return triggerServerAction(instanceId, 'server-restart');
+}
+
+export async function sendGameServerCommand(instanceId: string, command: string): Promise<OperationResult> {
+  const res = await request<OperationResult | unknown>(`/v1/instances/${encodeURIComponent(instanceId)}/server-command`, {
+    method: 'POST',
+    body: { command },
   });
   const operationId = operationIdFromPayload(res);
   return typeof res === 'object' && res !== null && 'operationId' in res

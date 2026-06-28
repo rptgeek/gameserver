@@ -541,6 +541,7 @@ function logStreamNameFor(instanceId: string, source: "bootstrap" | "server"): s
 function parseLatestPlayerStatus(events: Array<{ timestamp?: number; message?: string }>) {
   let playerCount: number | undefined;
   let lastUpdatedAt: string | undefined;
+  let serverVersion: string | undefined;
   const players = new Set<string>();
 
   for (const event of events) {
@@ -553,11 +554,15 @@ function parseLatestPlayerStatus(events: Array<{ timestamp?: number; message?: s
 
   for (const event of [...events].reverse()) {
     const message = event.message ?? "";
+    const versionMatch = message.match(/\bVersion:\s*(V\s+[^\r\n,]+)/);
+    if (versionMatch?.[1] && !serverVersion) {
+      serverVersion = versionMatch[1].trim();
+    }
     const match = message.match(/\bPly:\s*(\d+)\b/);
     if (match?.[1]) {
       playerCount = Number(match[1]);
       lastUpdatedAt = event.timestamp ? new Date(event.timestamp).toISOString() : undefined;
-      break;
+      if (serverVersion) break;
     }
   }
 
@@ -565,6 +570,7 @@ function parseLatestPlayerStatus(events: Array<{ timestamp?: number; message?: s
     playerCount: playerCount ?? 0,
     players: Array.from(players),
     lastUpdatedAt,
+    serverVersion,
   };
 }
 
@@ -731,6 +737,144 @@ function isSupportedAction(value: unknown): value is SupportedAction {
   );
 }
 
+type GameServerAction = "server-start" | "server-stop" | "server-restart";
+
+function isGameServerAction(value: unknown): value is GameServerAction {
+  return value === "server-start" || value === "server-stop" || value === "server-restart";
+}
+
+function gameServerActionCommands(action: GameServerAction): string[] {
+  const service = "7d2d-server";
+  if (action === "server-start") {
+    return [
+      `sudo systemctl start ${service}`,
+      "sleep 3",
+      `sudo systemctl is-active ${service} || true`,
+    ];
+  }
+  if (action === "server-stop") {
+    return [
+      `sudo systemctl stop ${service}`,
+      "sleep 3",
+      `sudo systemctl is-active ${service} || true`,
+    ];
+  }
+  return [
+    `sudo systemctl restart ${service}`,
+    "sleep 5",
+    `sudo systemctl is-active ${service} || true`,
+  ];
+}
+
+function gameServerConsoleCommands(commandText: string): string[] {
+  const encoded = Buffer.from(commandText, "utf8").toString("base64");
+  const python = [
+    "python3 -c",
+    shellSingleQuote(
+      "import base64, pathlib, re, socket, sys, time\n" +
+        "cmd = base64.b64decode(sys.argv[1]).decode()\n" +
+        "cfg = pathlib.Path('/opt/7d2d/serverconfig.xml')\n" +
+        "text = cfg.read_text() if cfg.exists() else ''\n" +
+        "def prop(name, default=''):\n" +
+        "    m = re.search(r'<property\\s+name=\"' + re.escape(name) + r'\"\\s+value=\"([^\"]*)\"', text)\n" +
+        "    return m.group(1) if m else default\n" +
+        "if prop('TelnetEnabled', 'false').lower() != 'true':\n" +
+        "    raise SystemExit('TelnetEnabled is not true in /opt/7d2d/serverconfig.xml')\n" +
+        "port = int(prop('TelnetPort', '8081') or '8081')\n" +
+        "password = prop('TelnetPassword', '')\n" +
+        "sock = socket.create_connection(('127.0.0.1', port), timeout=8)\n" +
+        "sock.settimeout(1)\n" +
+        "def recv_window(seconds=1.0):\n" +
+        "    end = time.time() + seconds\n" +
+        "    chunks = []\n" +
+        "    while time.time() < end:\n" +
+        "        try:\n" +
+        "            chunks.append(sock.recv(4096))\n" +
+        "        except socket.timeout:\n" +
+        "            break\n" +
+        "    return b''.join(chunks).decode(errors='replace')\n" +
+        "out = recv_window()\n" +
+        "if password:\n" +
+        "    sock.sendall((password + '\\n').encode())\n" +
+        "    out += recv_window()\n" +
+        "sock.sendall((cmd + '\\n').encode())\n" +
+        "out += recv_window(2.0)\n" +
+        "sock.sendall(b'exit\\n')\n" +
+        "out += recv_window(0.5)\n" +
+        "sock.close()\n" +
+        "print(out[-12000:])",
+    ),
+    encoded,
+  ].join(" ");
+  return [python];
+}
+
+async function executeGameServerAction(
+  req: AuthenticatedRequest,
+  instanceId: string,
+  action: GameServerAction,
+): Promise<OperationItem> {
+  const { operation, replay } = await createOperation(req, action, [instanceId], { action }, cleanIdempotencyKey(req.headers["idempotency-key"]));
+  if (replay) return operation;
+
+  try {
+    const command = await ssmClient.send(
+      new SendCommandCommand({
+        InstanceIds: [instanceId],
+        DocumentName: "AWS-RunShellScript",
+        Comment: `game-server:${action}`,
+        Parameters: { commands: gameServerActionCommands(action) },
+      }),
+    );
+    return saveOperation(operation, {
+      commandId: command.Command?.CommandId,
+      commandDocument: "AWS-RunShellScript",
+      status: "running",
+    });
+  } catch (error) {
+    return saveOperation(operation, {
+      status: "failed",
+      error: (error as Error).message,
+    });
+  }
+}
+
+async function executeGameServerCommand(
+  req: AuthenticatedRequest,
+  instanceId: string,
+  commandText: string,
+): Promise<OperationItem> {
+  const { operation, replay } = await createOperation(
+    req,
+    "server-command",
+    [instanceId],
+    { command: commandText },
+    cleanIdempotencyKey(req.headers["idempotency-key"]),
+  );
+  if (replay) return operation;
+
+  try {
+    const command = await ssmClient.send(
+      new SendCommandCommand({
+        InstanceIds: [instanceId],
+        DocumentName: "AWS-RunShellScript",
+        Comment: "game-server:command",
+        Parameters: { commands: gameServerConsoleCommands(commandText) },
+      }),
+    );
+    return saveOperation(operation, {
+      commandId: command.Command?.CommandId,
+      commandDocument: "AWS-RunShellScript",
+      status: "running",
+    });
+  } catch (error) {
+    return saveOperation(operation, {
+      status: "failed",
+      error: (error as Error).message,
+    });
+  }
+}
+
 async function lookupOperationByIdempotency(
   key: string | undefined,
 ): Promise<OperationItem | undefined> {
@@ -870,6 +1014,54 @@ async function saveOperation(
   const updated = { ...operation, ...patch, updatedAt: new Date().toISOString() };
   await operationRepository.put(updated);
   return updated;
+}
+
+function operationStatusFromSsm(status: string | undefined): OperationItem["status"] {
+  if (status === "Success") return "succeeded";
+  if (
+    status === "Failed" ||
+    status === "Cancelled" ||
+    status === "Cancelling" ||
+    status === "TimedOut"
+  ) {
+    return "failed";
+  }
+  return "running";
+}
+
+async function hydrateOperationCommandStatus(
+  operation: OperationItem,
+): Promise<OperationItem> {
+  if (!operation.commandId || operation.status !== "running" || operation.instanceIds.length === 0) {
+    return operation;
+  }
+  try {
+    const invocation = await ssmClient.send(
+      new GetCommandInvocationCommand({
+        CommandId: operation.commandId,
+        InstanceId: operation.instanceIds[0],
+      }),
+    );
+    const status = operationStatusFromSsm(invocation.Status);
+    if (status === operation.status) {
+      return operation;
+    }
+    return saveOperation(operation, {
+      status,
+      error:
+        status === "failed"
+          ? invocation.StandardErrorContent || invocation.StandardOutputContent || invocation.StatusDetails
+          : operation.error,
+      payload: {
+        ...(operation.payload ?? {}),
+        commandStatus: invocation.Status,
+        responseCode: invocation.ResponseCode,
+        output: invocation.StandardOutputContent,
+      },
+    });
+  } catch {
+    return operation;
+  }
 }
 
 async function launchSsmCommand(
@@ -2060,6 +2252,38 @@ export function createRouter(): Router {
     }),
   );
 
+  router.post(
+    "/v1/instances/:instanceId/server-action",
+    withAsync(async (req, res) => {
+      const authReq = req as AuthenticatedRequest;
+      const action = req.body?.action;
+      if (!isGameServerAction(action)) {
+        res.status(400).json({ error: "action must be server-start|server-stop|server-restart" });
+        return;
+      }
+      const operation = await executeGameServerAction(authReq, req.params.instanceId, action);
+      res.json(operation);
+    }),
+  );
+
+  router.post(
+    "/v1/instances/:instanceId/server-command",
+    withAsync(async (req, res) => {
+      const authReq = req as AuthenticatedRequest;
+      const command = typeof req.body?.command === "string" ? req.body.command.trim() : "";
+      if (!command) {
+        res.status(400).json({ error: "command is required" });
+        return;
+      }
+      if (command.length > 500) {
+        res.status(400).json({ error: "command must be 500 characters or fewer" });
+        return;
+      }
+      const operation = await executeGameServerCommand(authReq, req.params.instanceId, command);
+      res.json(operation);
+    }),
+  );
+
   router.get(
     "/v1/instances/:instanceId/player-status",
     withAsync(async (req, res) => {
@@ -2090,6 +2314,7 @@ export function createRouter(): Router {
             playerCount: 0,
             players: [],
             lastUpdatedAt: undefined,
+            serverVersion: undefined,
           });
           return;
         }
@@ -2294,7 +2519,7 @@ export function createRouter(): Router {
         res.status(404).json({ error: "operation not found" });
         return;
       }
-      res.json({ operation });
+      res.json({ operation: await hydrateOperationCommandStatus(operation) });
     }),
   );
 

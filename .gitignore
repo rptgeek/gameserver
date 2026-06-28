@@ -1,3 +1,16 @@
 # Local runtime artifacts
 .DS_Store
 scripts/.game-spot/*.state
+
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+frontend/dist/
+infra/dist/
+
+# AWS CDK output
+cdk.out/
+infra/cdk.out/
+infra/cdk.context.json

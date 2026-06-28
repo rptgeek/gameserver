@@ -244,7 +244,10 @@ install_game() {
     ""|public|stable|release|default|general|current)
       install_branches+=("")
       ;;
-    latest_experimental|latest-experimental|latestexperimental|experimental|beta)
+    latest_experimental|latest-experimental|latestexperimental)
+      install_branches+=("latest_experimental" "")
+      ;;
+    experimental|beta)
       install_branches+=("experimental" "")
       ;;
     *)
@@ -424,9 +427,13 @@ if [[ ! -f "${GAMECONFIG_LOCAL_PATH}" ]]; then
   <property name="ServerMaxAllowedViewDistance" value="12" />
   <property name="ServerAllowCrossplay" value="true" />
   <property name="HideCommandExecutionLog" value="0" />
+  <property name="TelnetEnabled" value="true" />
+  <property name="TelnetPort" value="8081" />
+  <property name="TelnetPassword" value="" />
+  <property name="TelnetFailedLoginLimit" value="10" />
+  <property name="TelnetFailedLoginsBlocktime" value="10" />
 
   <!-- Slots and identity -->
-  <property name="UserDataFolder" value="" />
   <property name="PersistentPlayerProfiles" value="false" />
   <property name="MaxUncoveredMapChunksPerPlayer" value="131072" />
 
@@ -494,7 +501,7 @@ if [[ ! -f "${GAMECONFIG_LOCAL_PATH}" ]]; then
   <property name="LandClaimOfflineDelay" value="0" />
 
   <!-- Dynamic mesh -->
-  <property name="DynamicMeshEnabled" value="true" />
+  <property name="DynamicMeshEnabled" value="false" />
   <property name="DynamicMeshLandClaimOnly" value="true" />
   <property name="DynamicMeshLandClaimBuffer" value="3" />
   <property name="DynamicMeshMaxItemCache" value="3" />

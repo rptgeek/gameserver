@@ -20,8 +20,12 @@ import {
   listWorlds,
   listGames,
   listInstances,
+  restartGameServer,
   restartInstance,
+  sendGameServerCommand,
+  startGameServer,
   startInstance,
+  stopGameServer,
   stopInstance,
   streamLogs,
   saveWorldServerConfig,
@@ -40,7 +44,7 @@ import type {
   WorldPreset,
 } from './types';
 
-type DetailTab = 'overview' | 'bootstrap-logs' | 'server-logs' | 'config';
+type DetailTab = 'overview' | 'bootstrap-logs' | 'server-logs' | 'console' | 'config';
 
 interface Toast {
   id: string;
@@ -141,6 +145,10 @@ function playerSummary(status?: PlayerStatus): string {
   return `${status.playerCount}`;
 }
 
+function instanceGameId(instance: ServerInstance): string {
+  return String(instance.gameId || instance.game || '');
+}
+
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -153,6 +161,7 @@ export default function App() {
   const [instances, setInstances] = useState<ServerInstance[]>([]);
   const [instancesLoading, setInstancesLoading] = useState(false);
   const [showTerminatedInstances, setShowTerminatedInstances] = useState(false);
+  const [showSavedWorlds, setShowSavedWorlds] = useState(true);
   const [selectedInstance, setSelectedInstance] = useState<ServerInstance | null>(null);
 
   const [detailTab, setDetailTab] = useState<DetailTab>('overview');
@@ -169,6 +178,9 @@ export default function App() {
   const [logsAutoRefresh, setLogsAutoRefresh] = useState(true);
   const [logsLive, setLogsLive] = useState(false);
   const [logsNextToken, setLogsNextToken] = useState<string | undefined>(undefined);
+  const [logsClearMarker, setLogsClearMarker] = useState<string | null>(null);
+  const [serverCommand, setServerCommand] = useState('');
+  const [serverCommandBusy, setServerCommandBusy] = useState(false);
 
   const [toasts, setToasts] = useState<Toast[]>([]);
 
@@ -407,12 +419,22 @@ export default function App() {
     const load = async () => {
       setConfigError('');
       try {
+        const gameId = instanceGameId(selectedInstance);
+        if (gameId && selectedInstance.selectedWorldId) {
+          setServerConfigLoading(true);
+          const worldConfig = await getWorldServerConfig(gameId, selectedInstance.selectedWorldId);
+          setServerConfigXml(worldConfig.configXml || '');
+          setServerConfigKey(`${worldConfig.bucket}/${worldConfig.key}`);
+          return;
+        }
         const configResponse = await getConfig(instanceId(selectedInstance));
         const payload = configResponse.config === undefined ? configResponse : configResponse.config;
         setConfigText(JSON.stringify(payload ?? {}, null, 2));
       } catch (error) {
         const msg = error instanceof Error ? error.message : 'Failed to load config';
         notify('error', msg);
+      } finally {
+        setServerConfigLoading(false);
       }
     };
     load();
@@ -423,6 +445,7 @@ export default function App() {
       return;
     }
     setLogs([]);
+    setLogsClearMarker(null);
     setLogsNextToken(undefined);
     const kind: LogType = detailTab === 'bootstrap-logs' ? 'bootstrap' : 'server';
     const load = async () => {
@@ -518,6 +541,50 @@ export default function App() {
     }
   };
 
+  const handleServerAction = async (instance: ServerInstance, kind: 'start' | 'stop' | 'restart') => {
+    if (isOperationRunning(instance)) {
+      return;
+    }
+    try {
+      const id = instanceId(instance);
+      const op =
+        kind === 'start'
+          ? await startGameServer(id)
+          : kind === 'stop'
+            ? await stopGameServer(id)
+            : await restartGameServer(id);
+      notify('info', `7D2D server ${kind} submitted: ${op.operationId}`);
+      pollOperation(id, op.operationId);
+      if (kind !== 'stop') {
+        setDetailTab('server-logs');
+      }
+    } catch (error) {
+      notify('error', error instanceof Error ? error.message : `Unable to ${kind} 7D2D server`);
+    }
+  };
+
+  const handleSendServerCommand = async () => {
+    if (!selectedInstance) {
+      return;
+    }
+    const command = serverCommand.trim();
+    if (!command) {
+      notify('error', 'Enter a 7D2D console command first.');
+      return;
+    }
+    try {
+      setServerCommandBusy(true);
+      const op = await sendGameServerCommand(instanceId(selectedInstance), command);
+      notify('info', `Command submitted: ${op.operationId}`);
+      pollOperation(instanceId(selectedInstance), op.operationId);
+      setServerCommand('');
+    } catch (error) {
+      notify('error', error instanceof Error ? error.message : 'Unable to send server command');
+    } finally {
+      setServerCommandBusy(false);
+    }
+  };
+
   const handleSaveConfig = async () => {
     if (!selectedInstance) {
       return;
@@ -527,6 +594,15 @@ export default function App() {
       return;
     }
     try {
+      const gameId = instanceGameId(selectedInstance);
+      if (gameId && selectedInstance.selectedWorldId) {
+        setServerConfigSaving(true);
+        setConfigError('');
+        const saved = await saveWorldServerConfig(gameId, selectedInstance.selectedWorldId, serverConfigXml);
+        setServerConfigKey(`${saved.bucket}/${saved.key}`);
+        notify('success', 'serverconfig.xml saved. Restart 7D2D to apply it.');
+        return;
+      }
       const parsed = JSON.parse(configText);
       setConfigSaving(true);
       setConfigError('');
@@ -542,6 +618,7 @@ export default function App() {
       }
     } finally {
       setConfigSaving(false);
+      setServerConfigSaving(false);
     }
   };
 
@@ -561,6 +638,14 @@ export default function App() {
       setLogsLoading(false);
     }
   };
+
+  const handleClearLogsView = () => {
+    setLogsClearMarker(logs.length > 0 ? logs[logs.length - 1] : null);
+  };
+
+  const visibleLogs = logsClearMarker
+    ? logs.slice(logs.lastIndexOf(logsClearMarker) >= 0 ? logs.lastIndexOf(logsClearMarker) + 1 : 0)
+    : logs;
 
   const handleOpenAddModal = () => {
     setAddForm({
@@ -881,102 +966,134 @@ export default function App() {
         </div>
       </header>
 
-      <main className="dashboard-grid">
-        <section className="panel">
-          <div className="panel-head">
-            <h2>Saved worlds</h2>
-            <div className="toolbar">
-              <label htmlFor="game-filter" className="sr-only">
-                Game filter
-              </label>
-              <select
-                id="game-filter"
-                value={selectedGameId}
-                onChange={(event) => setSelectedGameId(event.target.value)}
-                className="select"
-              >
-                <option value="all">All games</option>
-                {games.map((game) => (
-                  <option key={game.id} value={game.id}>
-                    {game.name}
-                  </option>
-                ))}
-              </select>
-              <label className="checkbox-row">
-                <input
-                  type="checkbox"
-                  checked={showTerminatedInstances}
-                  onChange={(event) => setShowTerminatedInstances(event.target.checked)}
-                />
-                Show terminated
-              </label>
-              <button type="button" className="btn btn-success" onClick={handleOpenAddModal}>
-                Add instance
-              </button>
-            </div>
-          </div>
+      <main className={`dashboard-grid ${showSavedWorlds ? '' : 'saved-worlds-collapsed'}`}>
+        <aside className={`panel saved-worlds-panel ${showSavedWorlds ? '' : 'panel-collapsed'}`}>
+          {showSavedWorlds ? (
+            <>
+              <div className="panel-head">
+                <h2>Saved worlds</h2>
+                <div className="toolbar">
+                  <button
+                    type="button"
+                    className="btn btn-small"
+                    aria-expanded={showSavedWorlds}
+                    onClick={() => setShowSavedWorlds(false)}
+                  >
+                    Collapse saved worlds
+                  </button>
+                  <label htmlFor="game-filter" className="sr-only">
+                    Game filter
+                  </label>
+                  <select
+                    id="game-filter"
+                    value={selectedGameId}
+                    onChange={(event) => setSelectedGameId(event.target.value)}
+                    className="select"
+                  >
+                    <option value="all">All games</option>
+                    {games.map((game) => (
+                      <option key={game.id} value={game.id}>
+                        {game.name}
+                      </option>
+                    ))}
+                  </select>
+                  <label className="checkbox-row">
+                    <input
+                      type="checkbox"
+                      checked={showTerminatedInstances}
+                      onChange={(event) => setShowTerminatedInstances(event.target.checked)}
+                    />
+                    Show terminated
+                  </label>
+                  <button type="button" className="btn btn-success" onClick={handleOpenAddModal}>
+                    Add instance
+                  </button>
+                </div>
+              </div>
 
-          {selectedGameId === 'all' || !selectedGameId ? (
-            <div className="empty">Choose a game to see saved worlds from its S3 save paths.</div>
-          ) : visibleWorlds.length === 0 ? (
-            <div className="empty">No saved worlds found for this game. Create a world preset to launch from S3.</div>
+              {selectedGameId === 'all' || !selectedGameId ? (
+                <div className="empty">Choose a game to see saved worlds from its S3 save paths.</div>
+              ) : visibleWorlds.length === 0 ? (
+                <div className="empty">No saved worlds found for this game. Create a world preset to launch from S3.</div>
+              ) : (
+                <div className="world-grid">
+                  {visibleWorlds.map((world) => {
+                    const runtime = worldRuntimeState(world);
+                    const active = runtime.status !== 'offline';
+                    const status = runtime.instance ? playerStatuses[instanceId(runtime.instance)] : undefined;
+                    return (
+                      <article className="world-card" key={world.worldId}>
+                        <div className="world-card-head">
+                          <div>
+                            <h3>{world.name}</h3>
+                            <p>{world.description || 'Saved world'}</p>
+                          </div>
+                          <span className={statusClassName(runtime.status)}>{runtime.status}</span>
+                        </div>
+                        <div className="world-meta">
+                          <span>Bucket</span>
+                          <strong>{worldBucket(world, profiles)}</strong>
+                          <span>S3 path</span>
+                          <strong>{worldS3Prefix(world)}/state</strong>
+                          <span>Last backup</span>
+                          <strong>{prettyDate(runtime.lastBackupAt)}</strong>
+                          <span>Public IP</span>
+                          <strong>{runtime.publicIp || '—'}</strong>
+                          <span>Players</span>
+                          <strong>{playerSummary(status)}</strong>
+                          <span>Version</span>
+                          <strong>{status?.serverVersion || '—'}</strong>
+                          <span>Player check</span>
+                          <strong>{prettyDate(status?.lastUpdatedAt)}</strong>
+                        </div>
+                        <div className="row-actions">
+                          <button
+                            type="button"
+                            className="btn btn-success"
+                            disabled={active}
+                            onClick={() => handleConfigureWorldLaunch(world)}
+                          >
+                            Configure & launch
+                          </button>
+                          {runtime.instance && (
+                            <button
+                              type="button"
+                              className="btn btn-small"
+                              onClick={() => {
+                                setSelectedInstance(runtime.instance || null);
+                                setDetailTab(active ? 'server-logs' : 'overview');
+                              }}
+                            >
+                              {active ? 'View running server' : 'View last launch'}
+                            </button>
+                          )}
+                        </div>
+                      </article>
+                    );
+                  })}
+                </div>
+              )}
+            </>
           ) : (
-            <div className="world-grid">
-              {visibleWorlds.map((world) => {
-                const runtime = worldRuntimeState(world);
-                const active = runtime.status !== 'offline';
-                const status = runtime.instance ? playerStatuses[instanceId(runtime.instance)] : undefined;
-                return (
-                  <article className="world-card" key={world.worldId}>
-                    <div className="world-card-head">
-                      <div>
-                        <h3>{world.name}</h3>
-                        <p>{world.description || 'Saved world'}</p>
-                      </div>
-                      <span className={statusClassName(runtime.status)}>{runtime.status}</span>
-                    </div>
-                    <div className="world-meta">
-                      <span>Bucket</span>
-                      <strong>{worldBucket(world, profiles)}</strong>
-                      <span>S3 path</span>
-                      <strong>{worldS3Prefix(world)}/state</strong>
-                      <span>Last backup</span>
-                      <strong>{prettyDate(runtime.lastBackupAt)}</strong>
-                      <span>Public IP</span>
-                      <strong>{runtime.publicIp || '—'}</strong>
-                      <span>Players</span>
-                      <strong>{playerSummary(status)}</strong>
-                      <span>Player check</span>
-                      <strong>{prettyDate(status?.lastUpdatedAt)}</strong>
-                    </div>
-                    <div className="row-actions">
-                      <button
-                        type="button"
-                        className="btn btn-success"
-                        disabled={active}
-                        onClick={() => handleConfigureWorldLaunch(world)}
-                      >
-                        Configure & launch
-                      </button>
-                      {runtime.instance && (
-                        <button
-                          type="button"
-                          className="btn btn-small"
-                          onClick={() => {
-                            setSelectedInstance(runtime.instance || null);
-                            setDetailTab(active ? 'server-logs' : 'overview');
-                          }}
-                        >
-                          {active ? 'View running server' : 'View last launch'}
-                        </button>
-                      )}
-                    </div>
-                  </article>
-                );
-              })}
-            </div>
+            <button
+              type="button"
+              className="collapsed-panel-toggle"
+              aria-expanded={showSavedWorlds}
+              onClick={() => setShowSavedWorlds(true)}
+            >
+              Show saved worlds
+              <span>
+                {selectedGameId === 'all' || !selectedGameId
+                  ? 'hidden'
+                  : `${visibleWorlds.length} world${visibleWorlds.length === 1 ? '' : 's'}`}
+              </span>
+            </button>
           )}
 
+        </aside>
+
+        <div className="main-workspace">
+          <section className="panel">
           <div className="table-wrap">
             {instancesLoading ? (
               <div className="empty">Loading instances…</div>
@@ -1078,7 +1195,7 @@ export default function App() {
               </table>
             )}
           </div>
-        </section>
+          </section>
 
         <section className="panel">
           <div className="panel-head">
@@ -1127,6 +1244,13 @@ export default function App() {
                 </button>
                 <button
                   type="button"
+                  className={`tab-btn ${detailTab === 'console' ? 'active' : ''}`}
+                  onClick={() => setDetailTab('console')}
+                >
+                  Console
+                </button>
+                <button
+                  type="button"
                   className={`tab-btn ${detailTab === 'config' ? 'active' : ''}`}
                   onClick={() => setDetailTab('config')}
                 >
@@ -1161,6 +1285,10 @@ export default function App() {
                       <strong>{playerSummary(playerStatuses[instanceId(selectedInstance)])}</strong>
                     </div>
                     <div className="kv">
+                      <span>Version</span>
+                      <strong>{playerStatuses[instanceId(selectedInstance)]?.serverVersion || '—'}</strong>
+                    </div>
+                    <div className="kv">
                       <span>Player check</span>
                       <strong>{prettyDate(playerStatuses[instanceId(selectedInstance)]?.lastUpdatedAt)}</strong>
                     </div>
@@ -1171,6 +1299,29 @@ export default function App() {
                     <div className="kv">
                       <span>Selected world</span>
                       <strong>{selectedInstance.worldName || selectedInstance.selectedWorldId || '—'}</strong>
+                    </div>
+                    <div className="row-actions actions">
+                      <button
+                        className="btn btn-small btn-success"
+                        disabled={isOperationRunning(selectedInstance)}
+                        onClick={() => handleServerAction(selectedInstance, 'start')}
+                      >
+                        Start 7D2D
+                      </button>
+                      <button
+                        className="btn btn-small"
+                        disabled={isOperationRunning(selectedInstance)}
+                        onClick={() => handleServerAction(selectedInstance, 'stop')}
+                      >
+                        Stop 7D2D
+                      </button>
+                      <button
+                        className="btn btn-small"
+                        disabled={isOperationRunning(selectedInstance)}
+                        onClick={() => handleServerAction(selectedInstance, 'restart')}
+                      >
+                        Restart 7D2D
+                      </button>
                     </div>
                     <div className="row-actions actions">
                       <button
@@ -1225,34 +1376,103 @@ export default function App() {
                           Load older
                         </button>
                       )}
+                      <button type="button" className="btn btn-small" onClick={handleClearLogsView} disabled={logs.length === 0}>
+                        Clear view
+                      </button>
+                      {logsClearMarker && <span className="log-filter-note">Showing new lines only</span>}
                     </div>
-                    <pre className="log-output">{logsLoading ? 'Loading logs…' : logs.join('\n') || 'No log lines.'}</pre>
+                    <pre className="log-output">{logsLoading ? 'Loading logs…' : visibleLogs.join('\n') || 'No log lines.'}</pre>
+                  </div>
+                )}
+
+                {detailTab === 'console' && (
+                  <div className="console-panel">
+                    <p className="field-hint">
+                      Sends a command to the running 7D2D telnet console on the instance. Examples: status, listplayers, saveworld, say Server restart in 5 minutes.
+                    </p>
+                    <div className="console-command-row">
+                      <input
+                        type="text"
+                        value={serverCommand}
+                        onChange={(event) => setServerCommand(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter') {
+                            event.preventDefault();
+                            void handleSendServerCommand();
+                          }
+                        }}
+                        placeholder="7D2D console command"
+                      />
+                      <button
+                        type="button"
+                        className="btn btn-success"
+                        disabled={serverCommandBusy || !serverCommand.trim()}
+                        onClick={handleSendServerCommand}
+                      >
+                        Send
+                      </button>
+                    </div>
+                    <div className="row-actions actions">
+                      <button className="btn btn-small" onClick={() => setServerCommand('status')}>status</button>
+                      <button className="btn btn-small" onClick={() => setServerCommand('listplayers')}>listplayers</button>
+                      <button className="btn btn-small" onClick={() => setServerCommand('saveworld')}>saveworld</button>
+                    </div>
+                    <p className="field-hint">
+                      Command output is recorded in the operation result. Server-side effects also appear in Server Logs.
+                    </p>
+                    {operations[instanceId(selectedInstance)]?.payload?.output && (
+                      <pre className="log-output">
+                        {operations[instanceId(selectedInstance)]?.payload?.output}
+                      </pre>
+                    )}
+                    {operations[instanceId(selectedInstance)]?.error && (
+                      <div className="error">{operations[instanceId(selectedInstance)]?.error}</div>
+                    )}
                   </div>
                 )}
 
                 {detailTab === 'config' && (
                   <div className="config-panel">
-                    <textarea
-                      value={configText}
-                      onChange={(event) => setConfigText(event.target.value)}
-                      className="json-editor"
-                      spellCheck={false}
-                    />
+                    {instanceGameId(selectedInstance) && selectedInstance.selectedWorldId ? (
+                      <>
+                        <p className="field-hint">
+                          Editing S3 serverconfig.xml for world {selectedInstance.worldName || selectedInstance.selectedWorldId}.
+                          Restart 7D2D after saving to apply changes.
+                        </p>
+                        {serverConfigKey && <small className="field-hint">S3: {serverConfigKey}</small>}
+                        <textarea
+                          value={serverConfigLoading ? 'Loading serverconfig.xml…' : serverConfigXml}
+                          onChange={(event) => setServerConfigXml(event.target.value)}
+                          className="xml-editor"
+                          disabled={serverConfigLoading}
+                          spellCheck={false}
+                        />
+                      </>
+                    ) : (
+                      <>
+                        <textarea
+                          value={configText}
+                          onChange={(event) => setConfigText(event.target.value)}
+                          className="json-editor"
+                          spellCheck={false}
+                        />
+                        <label>
+                          Save mode:
+                          <select value={configMode} onChange={(event) => setConfigMode(event.target.value as 'apply' | 'applyAndRestart')}>
+                            <option value="apply">apply</option>
+                            <option value="applyAndRestart">applyAndRestart</option>
+                          </select>
+                        </label>
+                      </>
+                    )}
                     <div className="row-actions">
-                      <label>
-                        Save mode:
-                        <select value={configMode} onChange={(event) => setConfigMode(event.target.value as 'apply' | 'applyAndRestart')}>
-                          <option value="apply">apply</option>
-                          <option value="applyAndRestart">applyAndRestart</option>
-                        </select>
-                      </label>
                       {configError && <div className="error">{configError}</div>}
                       <button
                         className="btn btn-success"
-                        disabled={configSaving}
+                        disabled={configSaving || serverConfigSaving || serverConfigLoading}
                         onClick={handleSaveConfig}
                       >
-                        Save config
+                        {instanceGameId(selectedInstance) && selectedInstance.selectedWorldId ? 'Save serverconfig.xml' : 'Save config'}
                       </button>
                     </div>
                   </div>
@@ -1261,6 +1481,7 @@ export default function App() {
             </>
           )}
         </section>
+        </div>
       </main>
 
       {showAddInstance && (
