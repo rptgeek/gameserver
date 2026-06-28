@@ -428,6 +428,58 @@ function worldPk(gameId: string, worldId: string): string {
   return `game-world#${gameId}#${worldId}`;
 }
 
+function gameIdFromRecordKey(pk: string | undefined): string | undefined {
+  if (!pk || typeof pk !== "string") return undefined;
+  const [prefix, gameId] = pk.split("#");
+  return prefix === "game-profile" || prefix === "game-world" ? gameId : undefined;
+}
+
+function recordGameId(record: {
+  pk?: string;
+  gameId?: string;
+  gameRefId?: string;
+}): string | undefined {
+  if (typeof record.gameRefId === "string" && record.gameRefId.trim()) {
+    return record.gameRefId.trim();
+  }
+  if (typeof record.gameId === "string" && record.gameId.trim()) {
+    return record.gameId.trim();
+  }
+  return gameIdFromRecordKey(record.pk);
+}
+
+function isGameProfileForGame(profile: GameProfileItem, gameId: string): boolean {
+  return recordGameId(profile) === gameId;
+}
+
+function isGameWorldForGame(world: WorldPresetItem, gameId: string): boolean {
+  return recordGameId(world) === gameId;
+}
+
+function isLikelyGameRecord(game: GameItem): boolean {
+  if (game.kind === "game") {
+    return Boolean(recordGameId(game));
+  }
+
+  if (game.kind) {
+    return false;
+  }
+
+  if (typeof game.pk === "string" && game.pk.includes("#")) {
+    return false;
+  }
+
+  return Boolean(recordGameId(game));
+}
+
+function hasProfileShape(profile: GameProfileItem): boolean {
+  return profile.kind === "game-profile" || profile.pk.startsWith("game-profile#");
+}
+
+function hasWorldShape(world: WorldPresetItem): boolean {
+  return world.kind === "game-world" || world.pk.startsWith("game-world#");
+}
+
 function parseProfileListEntry(profile: GameProfileItem): GameProfileItem {
   return profile;
 }
@@ -638,7 +690,7 @@ async function createInstancesForSpec(
       );
       selectedProfile = fallback;
     }
-    if (!selectedProfile || selectedProfile.gameId !== gameId) {
+    if (!selectedProfile || !isGameProfileForGame(selectedProfile, gameId)) {
       throw new Error(`Unknown profile id: ${resolvedProfileId}`);
     }
   } else if (allProfiles.length > 0) {
@@ -662,7 +714,7 @@ async function createInstancesForSpec(
         .find((candidate) => candidate.worldId === spec.selectedWorldId);
       selectedWorld = fallback;
     }
-    if (!selectedWorld || selectedWorld.gameId !== gameId) {
+    if (!selectedWorld || !isGameWorldForGame(selectedWorld, gameId)) {
       throw new Error(`Unknown world id: ${spec.selectedWorldId}`);
     }
   }
@@ -1247,15 +1299,15 @@ export function createRouter(): Router {
     withAsync(async (_req, res) => {
       const rawGames = await gamesRepository.scan();
       const games = rawGames
-        .filter((game) => {
-          if (game.kind && game.kind !== "game") {
-            return false;
-          }
-          return Boolean(game.gameId);
-        })
-        .map((game) =>
-          game.kind ? game : { ...game, kind: "game" },
-        ) as GameItem[];
+        .filter((game) => isLikelyGameRecord(game))
+        .map((game) => {
+          const resolved = recordGameId(game) ?? game.pk;
+          return {
+            ...game,
+            gameId: game.gameId || resolved || game.pk,
+            kind: game.kind || "game",
+          };
+        }) as GameItem[];
       games.sort((a, b) => {
         const aName = a.name ?? a.gameId ?? "";
         const bName = b.name ?? b.gameId ?? "";
@@ -1273,7 +1325,7 @@ export function createRouter(): Router {
       const profiles = allProfiles
         .filter(
           (profile) =>
-            profile.kind === "game-profile" && profile.gameId === gameId,
+            hasProfileShape(profile) && isGameProfileForGame(profile, gameId),
         )
         .map((profile) => parseProfileListEntry(profile));
       profiles.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
@@ -1302,6 +1354,7 @@ export function createRouter(): Router {
       const profile: GameProfileItem = {
         pk: profilePk(gameId, profileId),
         gameId,
+        gameRefId: gameId,
         kind: "game-profile",
         profileId,
         name,
@@ -1378,7 +1431,7 @@ export function createRouter(): Router {
       const { gameId } = req.params;
       const allWorlds = await worldPresetsRepository.scan();
       const worlds = allWorlds
-        .filter((world) => world.kind === "game-world" && world.gameId === gameId)
+        .filter((world) => hasWorldShape(world) && isGameWorldForGame(world, gameId))
         .map((world) => parseWorldListEntry(world));
       worlds.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
       res.json({ worlds });
@@ -1406,6 +1459,7 @@ export function createRouter(): Router {
       const world: WorldPresetItem = {
         pk: worldPk(gameId, worldId),
         gameId,
+        gameRefId: gameId,
         kind: "game-world",
         worldId,
         name,

@@ -26,6 +26,7 @@ export interface ConfigField {
 export interface GameProfileItem {
   pk: string;
   gameId: string;
+  gameRefId?: string;
   kind: "game-profile";
   profileId: string;
   name: string;
@@ -69,6 +70,7 @@ export interface GameProfileItem {
 export interface WorldPresetItem {
   pk: string;
   gameId: string;
+  gameRefId?: string;
   kind: "game-world";
   worldId: string;
   name: string;
