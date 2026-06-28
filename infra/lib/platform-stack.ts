@@ -116,8 +116,7 @@ export class PlatformInfraStack extends cdk.Stack {
     });
 
     const instancesTable = new dynamodb.Table(this, 'InstancesTable', {
-      tableName: `${prefix}-instances`,
-      partitionKey: { name: 'instanceId', type: dynamodb.AttributeType.STRING },
+      partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       pointInTimeRecovery: true,
       encryption: dynamodb.TableEncryption.AWS_MANAGED,
@@ -125,9 +124,7 @@ export class PlatformInfraStack extends cdk.Stack {
     });
 
     const operationsTable = new dynamodb.Table(this, 'OperationsTable', {
-      tableName: `${prefix}-operations`,
-      partitionKey: { name: 'operationId', type: dynamodb.AttributeType.STRING },
-      sortKey: { name: 'requestedAt', type: dynamodb.AttributeType.STRING },
+      partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       pointInTimeRecovery: true,
       encryption: dynamodb.TableEncryption.AWS_MANAGED,
@@ -135,9 +132,7 @@ export class PlatformInfraStack extends cdk.Stack {
     });
 
     const configHistoryTable = new dynamodb.Table(this, 'ConfigHistoryTable', {
-      tableName: `${prefix}-config-history`,
-      partitionKey: { name: 'configName', type: dynamodb.AttributeType.STRING },
-      sortKey: { name: 'version', type: dynamodb.AttributeType.STRING },
+      partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       pointInTimeRecovery: true,
       encryption: dynamodb.TableEncryption.AWS_MANAGED,
@@ -145,8 +140,7 @@ export class PlatformInfraStack extends cdk.Stack {
     });
 
     const instanceConfigTable = new dynamodb.Table(this, 'InstanceConfigTable', {
-      tableName: `${prefix}-instance-config`,
-      partitionKey: { name: 'instanceId', type: dynamodb.AttributeType.STRING },
+      partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       pointInTimeRecovery: true,
       encryption: dynamodb.TableEncryption.AWS_MANAGED,
@@ -204,9 +198,7 @@ export class PlatformInfraStack extends cdk.Stack {
           'ec2:RebootInstances',
           'ec2:CreateTags',
         ],
-        resources: [
-          `arn:aws:ec2:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:instance/*`,
-        ],
+        resources: ['*'],
       }),
     );
 
