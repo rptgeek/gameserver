@@ -130,45 +130,57 @@ configure_cloudwatch_agent() {
     return 0
   fi
 
-  if command -v yum >/dev/null 2>&1; then
-    yum -y install awslogs || true
-  elif command -v apt-get >/dev/null 2>&1; then
-    apt-get install -y awslogs || true
+  if ! command -v /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl >/dev/null 2>&1; then
+    if command -v yum >/dev/null 2>&1; then
+      yum -y install amazon-cloudwatch-agent || true
+    elif command -v apt-get >/dev/null 2>&1; then
+      curl -fsSL https://s3.amazonaws.com/amazoncloudwatch-agent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb -o /tmp/amazon-cloudwatch-agent.deb || true
+      dpkg -i /tmp/amazon-cloudwatch-agent.deb || apt-get install -f -y || true
+    fi
   fi
 
-  if ! command -v awslogs >/dev/null 2>&1; then
+  if ! command -v /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl >/dev/null 2>&1; then
+    echo "CloudWatch Agent is unavailable; skipping log shipping setup."
     return 0
   fi
 
-  mkdir -p /etc/awslogs
-  cat > /etc/awslogs/awscli.conf <<'EOF'
-[plugins]
-cwlogs = cwlogs
-[default]
-region = {{WORLD_BUCKET_REGION}}
+  mkdir -p /opt/aws/amazon-cloudwatch-agent/etc
+  cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<EOF
+{
+  "agent": {
+    "region": "{{WORLD_BUCKET_REGION}}"
+  },
+  "logs": {
+    "logs_collected": {
+      "files": {
+        "collect_list": [
+          {
+            "file_path": "/var/log/${GAME_NAME}/bootstrap.log",
+            "log_group_name": "${bootstrap_group}",
+            "log_stream_name": "${stream}-bootstrap",
+            "timestamp_format": "%b %d %H:%M:%S"
+          },
+          {
+            "file_path": "/var/log/${GAME_NAME}/server.log",
+            "log_group_name": "${server_group}",
+            "log_stream_name": "${stream}-server",
+            "timestamp_format": "%b %d %H:%M:%S"
+          },
+          {
+            "file_path": "/var/log/${GAME_NAME}/server.error.log",
+            "log_group_name": "${server_group}",
+            "log_stream_name": "${stream}-server-error",
+            "timestamp_format": "%b %d %H:%M:%S"
+          }
+        ]
+      }
+    }
+  }
+}
 EOF
-
-  cat > /etc/awslogs/awslogs.conf <<EOF
-[general]
-state_file = /var/lib/awslogs/agent-state
-
-[bootstrap-log]
-datetime_format = %b %d %H:%M:%S
-file = /var/log/${GAME_NAME}/bootstrap.log
-buffer_duration = 5000
-log_group_name = ${bootstrap_group}
-log_stream_name = ${stream}-bootstrap
-
-[server-log]
-datetime_format = %b %d %H:%M:%S
-file = /var/log/${GAME_NAME}/server.log
-buffer_duration = 5000
-log_group_name = ${server_group}
-log_stream_name = ${stream}-server
-EOF
-  mkdir -p /var/lib/awslogs
-  service awslogs stop >/dev/null 2>&1 || true
-  service awslogs start >/dev/null 2>&1 || true
+  /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+    -a fetch-config -m ec2 -s \
+    -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json || true
 }
 
 upload_state() {
@@ -182,6 +194,35 @@ install_game() {
     tar -xzf /tmp/steamcmd_linux.tar.gz -C /opt/steamcmd
     chmod +x /opt/steamcmd/steamcmd.sh
   fi
+
+  ensure_steamcmd_runtime() {
+    if /opt/steamcmd/linux32/steamcmd +quit >/dev/null 2>&1; then
+      return 0
+    fi
+
+    echo "SteamCMD runtime check failed; attempting to install 32-bit compatibility dependencies."
+    if command -v dnf >/dev/null 2>&1; then
+      dnf -y install glibc.i686 libgcc.i686 libstdc++.i686 || true
+      dnf -y install glibc-devel.i686 libstdc++-devel.i686 || true
+    elif command -v yum >/dev/null 2>&1; then
+      yum -y install glibc.i686 libgcc.i686 libstdc++.i686 || true
+    elif command -v apt-get >/dev/null 2>&1; then
+      dpkg --add-architecture i386 || true
+      apt-get update || true
+      apt-get install -y libc6-i386 libstdc++6:i386 libgcc-s1:i386 || true
+      apt-get install -y libc6:i386 libstdc++6:i386 libgcc1:i386 || true
+      apt-get install -y libc6:i386 libstdc++6:i386 lib32gcc-s1 || true
+      apt-get install -y lib32stdc++6 || true
+      apt-get install -y lib32gcc1 || true
+    fi
+
+    if /opt/steamcmd/linux32/steamcmd +quit >/dev/null 2>&1; then
+      return 0
+    fi
+    return 1
+  }
+
+  ensure_steamcmd_runtime || true
 
   install_cmd="$(decode "${GAME_INSTALL_CMD_B64}")"
   install_branches=( )
@@ -376,6 +417,7 @@ WantedBy=timers.target
 BACKUP_TIMER
 
 systemctl daemon-reload
+configure_cloudwatch_agent
 restore_state
 install_game
 
@@ -386,7 +428,6 @@ fi
 systemctl enable "${GAME_SERVICE}-server.service" "${GAME_SERVICE}-watchdog.service" "${GAME_SERVICE}-backup.timer"
 systemctl start "${GAME_SERVICE}-server.service"
 systemctl start "${GAME_SERVICE}-backup.timer"
-configure_cloudwatch_agent
 
 cat <<INFO
 {{GAME_NAME}} bootstrap complete.
