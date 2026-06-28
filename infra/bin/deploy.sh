@@ -42,10 +42,16 @@ if [[ -n "${AWS_PROFILE}" ]]; then
   PROFILE_FLAG=(--profile "$AWS_PROFILE")
 fi
 
+if command -v cdk >/dev/null 2>&1; then
+  CDK_CMD=cdk
+else
+  CDK_CMD="npx cdk"
+fi
+
 if [[ "${2:-}" == "--bootstrap" ]]; then
-  npx cdk "${PROFILE_FLAG[@]}" bootstrap "${CDK_CONTEXT_ARGS[@]}"
+  $CDK_CMD "${PROFILE_FLAG[@]}" bootstrap "${CDK_CONTEXT_ARGS[@]}"
 fi
 
 npm install
-npx cdk synth "${CDK_CONTEXT_ARGS[@]}" "${PROFILE_FLAG[@]}"
-npx cdk deploy "${CDK_CONTEXT_ARGS[@]}" "${PROFILE_FLAG[@]}" --require-approval never
+$CDK_CMD synth "${CDK_CONTEXT_ARGS[@]}" "${PROFILE_FLAG[@]}"
+$CDK_CMD deploy "${CDK_CONTEXT_ARGS[@]}" "${PROFILE_FLAG[@]}" --require-approval never
