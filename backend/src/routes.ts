@@ -271,6 +271,81 @@ function parseSubnets(profileSubnetIds: string[] = [], specSubnetIds: string[] =
   return [];
 }
 
+function hasLaunchSettings(profile: GameProfileItem): boolean {
+  return (
+    normalizeTextList(profile.subnetIds).length > 0 &&
+    normalizeTextList(profile.securityGroupIds).length > 0 &&
+    Boolean(profile.keyName?.trim()) &&
+    Boolean(profile.iamInstanceProfile?.trim())
+  );
+}
+
+function withLaunchSettings(
+  selectedProfile: GameProfileItem,
+  profiles: GameProfileItem[],
+): GameProfileItem {
+  if (hasLaunchSettings(selectedProfile)) {
+    return selectedProfile;
+  }
+
+  const launchProfile = [...profiles]
+    .filter(hasLaunchSettings)
+    .sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""))[0];
+
+  if (!launchProfile) {
+    return selectedProfile;
+  }
+
+  return {
+    ...launchProfile,
+    ...selectedProfile,
+    config: {
+      ...(isObject(launchProfile.config) ? launchProfile.config : {}),
+      ...(isObject(selectedProfile.config) ? selectedProfile.config : {}),
+    },
+    instanceType: selectedProfile.instanceType || launchProfile.instanceType,
+    defaultInstanceType: selectedProfile.defaultInstanceType || launchProfile.defaultInstanceType,
+    amiId: selectedProfile.amiId || launchProfile.amiId,
+    subnetIds:
+      normalizeTextList(selectedProfile.subnetIds).length > 0
+        ? selectedProfile.subnetIds
+        : launchProfile.subnetIds,
+    securityGroupIds:
+      normalizeTextList(selectedProfile.securityGroupIds).length > 0
+        ? selectedProfile.securityGroupIds
+        : launchProfile.securityGroupIds,
+    keyName: selectedProfile.keyName || launchProfile.keyName,
+    iamInstanceProfile: selectedProfile.iamInstanceProfile || launchProfile.iamInstanceProfile,
+    worldBucket: selectedProfile.worldBucket || launchProfile.worldBucket,
+    s3Prefix: selectedProfile.s3Prefix || launchProfile.s3Prefix,
+    worldBucketRegion: selectedProfile.worldBucketRegion || launchProfile.worldBucketRegion,
+    gameInstallCmd: selectedProfile.gameInstallCmd || launchProfile.gameInstallCmd,
+    gameStartCmd: selectedProfile.gameStartCmd || launchProfile.gameStartCmd,
+    udpPorts:
+      normalizeTextList(selectedProfile.udpPorts).length > 0
+        ? selectedProfile.udpPorts
+        : launchProfile.udpPorts,
+    tcpPorts:
+      normalizeTextList(selectedProfile.tcpPorts).length > 0
+        ? selectedProfile.tcpPorts
+        : launchProfile.tcpPorts,
+    ingressCidr: selectedProfile.ingressCidr || launchProfile.ingressCidr,
+    gameName: selectedProfile.gameName || launchProfile.gameName,
+    gameHome: selectedProfile.gameHome || launchProfile.gameHome,
+    gameStateDirPath: selectedProfile.gameStateDirPath || launchProfile.gameStateDirPath,
+    gameConfigS3Key: selectedProfile.gameConfigS3Key || launchProfile.gameConfigS3Key,
+    gameConfigLocalPath: selectedProfile.gameConfigLocalPath || launchProfile.gameConfigLocalPath,
+    stateLink: selectedProfile.stateLink || launchProfile.stateLink,
+    steamBetaBranch: selectedProfile.steamBetaBranch || launchProfile.steamBetaBranch,
+    steamBetaPassword: selectedProfile.steamBetaPassword || launchProfile.steamBetaPassword,
+    backupIntervalMinutes: selectedProfile.backupIntervalMinutes || launchProfile.backupIntervalMinutes,
+    stopTimeoutSeconds: selectedProfile.stopTimeoutSeconds || launchProfile.stopTimeoutSeconds,
+    spotPriceBumpPercent: selectedProfile.spotPriceBumpPercent || launchProfile.spotPriceBumpPercent,
+    ensureSecurityGroupRules:
+      selectedProfile.ensureSecurityGroupRules ?? launchProfile.ensureSecurityGroupRules,
+  };
+}
+
 async function resolveSubnetZoneMap(subnetIds: string[]): Promise<Record<string, string>> {
   if (subnetIds.length === 0) {
     return {};
@@ -697,12 +772,14 @@ async function createInstancesForSpec(
     const sortedProfiles = [...allProfiles].sort(
       (a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""),
     );
-    selectedProfile = sortedProfiles[0];
+    selectedProfile = sortedProfiles.find(hasLaunchSettings) ?? sortedProfiles[0];
   }
 
   if (!selectedProfile) {
     throw new Error(`No launch profile found for gameId ${gameId}`);
   }
+
+  selectedProfile = withLaunchSettings(selectedProfile, allProfiles);
 
   let selectedWorld: WorldPresetItem | undefined;
   if (spec.selectedWorldId) {
