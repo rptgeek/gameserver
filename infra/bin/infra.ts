@@ -31,12 +31,8 @@ const projectName = process.env.PROJECT_NAME ?? app.node.tryGetContext('projectN
 const frontendDomainName = process.env.FRONTEND_DOMAIN_NAME ?? app.node.tryGetContext('frontendDomainName');
 const apiDomainName = process.env.API_DOMAIN_NAME ?? app.node.tryGetContext('apiDomainName');
 const cognitoDomainPrefix = process.env.COGNITO_DOMAIN_PREFIX ?? app.node.tryGetContext('cognitoDomainPrefix');
-const backendImage = process.env.BACKEND_IMAGE ?? app.node.tryGetContext('backendImage');
-const backendContainerPort = parseNumber(process.env.BACKEND_CONTAINER_PORT) ?? app.node.tryGetContext('backendContainerPort');
 const backendCpu = parseNumber(process.env.BACKEND_CPU) ?? app.node.tryGetContext('backendCpu');
 const backendMemoryMiB = parseNumber(process.env.BACKEND_MEMORY_MIB) ?? app.node.tryGetContext('backendMemoryMiB');
-const backendDesiredCount = parseNumber(process.env.BACKEND_DESIRED_COUNT) ?? app.node.tryGetContext('backendDesiredCount');
-const backendHealthCheckPath = process.env.BACKEND_HEALTH_CHECK_PATH ?? app.node.tryGetContext('backendHealthCheckPath');
 const cognitoCallbackUrls = parseCsv(process.env.COGNITO_CALLBACK_URLS) ?? app.node.tryGetContext('cognitoCallbackUrls');
 const cognitoLogoutUrls = parseCsv(process.env.COGNITO_LOGOUT_URLS) ?? app.node.tryGetContext('cognitoLogoutUrls');
 const apiAllowedOrigins = parseCsv(process.env.API_ALLOWED_ORIGINS) ?? app.node.tryGetContext('apiAllowedOrigins');
@@ -52,12 +48,8 @@ const stackProps: PlatformInfraStackProps = {
   frontendDomainName,
   apiDomainName,
   cognitoDomainPrefix,
-  backendImage,
-  backendContainerPort,
   backendCpu,
   backendMemoryMiB,
-  backendDesiredCount,
-  backendHealthCheckPath,
   cognitoCallbackUrls,
   cognitoLogoutUrls,
   apiAllowedOrigins,
