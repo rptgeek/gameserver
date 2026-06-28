@@ -1298,16 +1298,53 @@ export function createRouter(): Router {
     "/v1/games",
     withAsync(async (_req, res) => {
       const rawGames = await gamesRepository.scan();
-      const games = rawGames
+      const gameProfiles = await gameProfilesRepository.scan();
+      const worldPresets = await worldPresetsRepository.scan();
+
+      const gamesById = new Map<string, GameItem>();
+
+      rawGames
         .filter((game) => isLikelyGameRecord(game))
         .map((game) => {
           const resolved = recordGameId(game) ?? game.pk;
-          return {
+          const normalized = {
             ...game,
             gameId: game.gameId || resolved || game.pk,
             kind: game.kind || "game",
           };
-        }) as GameItem[];
+          if (normalized.gameId) {
+            gamesById.set(normalized.gameId, normalized as GameItem);
+          }
+          return normalized;
+        });
+
+      for (const profile of gameProfiles) {
+        const gameId = recordGameId(profile);
+        if (!gameId || gamesById.has(gameId)) {
+          continue;
+        }
+        gamesById.set(gameId, {
+          pk: gameId,
+          gameId,
+          kind: "game",
+          name: gameId === "7d2d" ? "7D2D" : gameId,
+        });
+      }
+
+      for (const world of worldPresets) {
+        const gameId = recordGameId(world);
+        if (!gameId || gamesById.has(gameId)) {
+          continue;
+        }
+        gamesById.set(gameId, {
+          pk: gameId,
+          gameId,
+          kind: "game",
+          name: gameId === "7d2d" ? "7D2D" : gameId,
+        });
+      }
+
+      const games = Array.from(gamesById.values()) as GameItem[];
       games.sort((a, b) => {
         const aName = a.name ?? a.gameId ?? "";
         const bName = b.name ?? b.gameId ?? "";

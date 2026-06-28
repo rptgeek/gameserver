@@ -1126,7 +1126,7 @@ export default function App() {
                 Cancel
               </button>
               <button type="button" className="btn btn-success" onClick={handleCreateInstance}>
-                Create
+                Launch instance
               </button>
             </div>
           </div>

@@ -378,6 +378,8 @@ tbody tr:hover {
   display: grid;
   gap: 0.65rem;
   box-shadow: 0 30px 60px rgba(3, 8, 28, 0.7);
+  max-height: calc(100vh - 2rem);
+  overflow: auto;
 }
 
 .modal h3 {
@@ -397,6 +399,12 @@ tbody tr:hover {
   display: flex;
   justify-content: flex-end;
   gap: 0.6rem;
+  position: sticky;
+  bottom: 0;
+  background: #101a38;
+  padding-top: 0.5rem;
+  margin-top: 0.5rem;
+  z-index: 1;
 }
 
 .toast-stack {

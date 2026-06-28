@@ -108,8 +108,7 @@ export class PlatformInfraStack extends cdk.Stack {
     });
 
     const gamesTable = new dynamodb.Table(this, 'GamesTable', {
-      tableName: `${prefix}-games`,
-      partitionKey: { name: 'gameId', type: dynamodb.AttributeType.STRING },
+      partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       pointInTimeRecovery: true,
       encryption: dynamodb.TableEncryption.AWS_MANAGED,
