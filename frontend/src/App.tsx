@@ -630,7 +630,7 @@ export default function App() {
     return (
       <div className="landing">
         <section className="auth-card">
-          <h1>7d2d Fleet Console</h1>
+          <h1>Game Fleet Console</h1>
           <p>Connect with AWS Cognito to manage instances, logs, and runtime configuration.</p>
           <button
             className="btn btn-primary"
@@ -655,7 +655,7 @@ export default function App() {
     <div className="app-shell">
       <header className="top-bar">
         <div>
-          <h1>7d2d Fleet Console</h1>
+          <h1>Game Fleet Console</h1>
           <p>{user.displayName || user.username}</p>
         </div>
         <div className="user-info">

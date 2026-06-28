@@ -15,7 +15,7 @@
     "stage": "dev",
     "projectName": "7d2d",
     "cognitoDomainPrefix": "7d2d-dev-auth",
-    "frontendDomainName": "frontend.example.com",
+    "frontendDomainName": "d151ne23hwzren.cloudfront.net",
     "apiDomainName": "api.example.com",
     "backendImage": "public.ecr.aws/docker/library/nginx:alpine",
     "backendContainerPort": 80,
@@ -26,14 +26,15 @@
     "apiAllowedOrigins": [
       "http://localhost:3000",
       "http://localhost:5173",
-      "https://frontend.example.com"
+      "https://d151ne23hwzren.cloudfront.net"
     ],
     "cognitoCallbackUrls": [
-      "https://frontend.example.com/auth/callback",
+      "https://d151ne23hwzren.cloudfront.net/auth/callback",
+      "https://d151ne23hwzren.cloudfront.net/",
       "http://localhost:3000/auth/callback"
     ],
     "cognitoLogoutUrls": [
-      "https://frontend.example.com/",
+      "https://d151ne23hwzren.cloudfront.net/",
       "http://localhost:3000/"
     ]
   }
