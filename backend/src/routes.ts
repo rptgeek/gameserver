@@ -96,6 +96,10 @@ async function requireAuth(
   next: NextFunction,
 ): Promise<void> {
   const authReq = req as AuthenticatedRequest;
+  if (req.method === "OPTIONS") {
+    next();
+    return;
+  }
   if (
     config.auth.authDisabled ||
     !config.auth.userPoolId ||
@@ -1230,6 +1234,10 @@ export function createRouter(): Router {
 
   router.get("/health", (_req, res) => {
     res.json({ status: "ok", time: new Date().toISOString(), env: config.nodeEnv });
+  });
+
+  router.options(/.*/, (_req, res) => {
+    res.status(204).json({ ok: true });
   });
 
   router.use(requireAuth);

@@ -464,6 +464,18 @@ export class PlatformInfraStack extends cdk.Stack {
     });
 
     httpApi.addRoutes({
+      path: '/{proxy+}',
+      methods: [apigateway.HttpMethod.OPTIONS],
+      integration: backendIntegration,
+    });
+
+    httpApi.addRoutes({
+      path: '/',
+      methods: [apigateway.HttpMethod.OPTIONS],
+      integration: backendIntegration,
+    });
+
+    httpApi.addRoutes({
       path: '/',
       methods: [apigateway.HttpMethod.ANY],
       integration: backendIntegration,
