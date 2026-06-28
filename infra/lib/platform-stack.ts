@@ -348,7 +348,6 @@ export class PlatformInfraStack extends cdk.Stack {
       NODE_ENV: stage,
       APP_STAGE: stage,
       APP_NAME: project,
-      AWS_REGION: cdk.Stack.of(this).region,
       AWS_DEFAULT_REGION: cdk.Stack.of(this).region,
       FRONTEND_ORIGIN: frontendHost,
       COGNITO_USER_POOL_ID: userPool.userPoolId,
