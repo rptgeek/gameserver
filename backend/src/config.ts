@@ -6,7 +6,10 @@ export const config = {
   auth: {
     cognitoRegion: process.env.COGNITO_REGION ?? process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? "us-east-1",
     userPoolId: process.env.COGNITO_USER_POOL_ID?.trim(),
-    clientId: process.env.COGNITO_CLIENT_ID?.trim(),
+    clientId: (
+      process.env.COGNITO_CLIENT_ID ??
+      process.env.COGNITO_USER_POOL_CLIENT_ID
+    )?.trim(),
     issuerTemplate: process.env.COGNITO_ISSUER,
     authDisabled: process.env.AUTH_DISABLED === "true",
     defaultRole: process.env.DEFAULT_AUTH_ROLE ?? "admin",
