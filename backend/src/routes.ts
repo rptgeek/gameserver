@@ -804,7 +804,6 @@ async function createInstancesForSpec(
     subnetId: spot.subnetId,
     securityGroupIds,
     spotPriceAtLaunch: spot.maxPrice,
-    worldPrefix,
     serverName,
   };
 
