@@ -367,6 +367,19 @@ export class PlatformInfraStack extends cdk.Stack {
       projectRoot: path.join(__dirname, '../..'),
       bundling: {
         forceDockerBundling: false,
+        commandHooks: {
+          beforeBundling() {
+            return [];
+          },
+          beforeInstall() {
+            return [];
+          },
+          afterBundling(inputDir: string, outputDir: string) {
+            return [
+              `cp ${path.join(inputDir, 'infra/assets/bootstrap.sh.tmpl')} ${path.join(outputDir, 'bootstrap.sh.tmpl')}`,
+            ];
+          },
+        },
       },
       role: backendLambdaRole,
       logRetention: logs.RetentionDays.ONE_WEEK,

@@ -471,6 +471,17 @@ function renderBootstrapTemplate(profile: GameProfileItem, worldPrefix: string, 
 }
 
 function bootstrapTemplate(): string {
+  if (process.env.BOOTSTRAP_TEMPLATE) {
+    return process.env.BOOTSTRAP_TEMPLATE;
+  }
+
+  const bundled = path.join(__dirname, "bootstrap.sh.tmpl");
+  try {
+    return readFileSync(bundled, "utf8");
+  } catch {
+    // Fall through to local development paths below.
+  }
+
   const candidate = path.join(process.cwd(), "infra", "assets", "bootstrap.sh.tmpl");
   try {
     return readFileSync(candidate, "utf8");
