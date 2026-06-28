@@ -228,7 +228,6 @@ install_game() {
       apt-get install -y libc6:i386 libstdc++6:i386 libgcc1:i386 || true
       apt-get install -y libc6:i386 libstdc++6:i386 lib32gcc-s1 || true
       apt-get install -y lib32stdc++6 || true
-      apt-get install -y lib32gcc1 || true
     fi
 
     if /opt/steamcmd/linux32/steamcmd +quit >/dev/null 2>&1; then
@@ -241,13 +240,17 @@ install_game() {
 
   install_cmd="$(decode "${GAME_INSTALL_CMD_B64}")"
   install_branches=( )
-  if [[ -n "${STEAM_BETA_BRANCH}" ]]; then
-    install_branches+=("${STEAM_BETA_BRANCH}")
-  fi
-  install_branches+=("")
-  if [[ "${STEAM_BETA_BRANCH}" == "latest_experimental" ]]; then
-    install_branches+=("experimental")
-  fi
+  case "${STEAM_BETA_BRANCH}" in
+    ""|public|stable|release|default|general|current)
+      install_branches+=("")
+      ;;
+    latest_experimental|latest-experimental|latestexperimental|experimental|beta)
+      install_branches+=("experimental" "")
+      ;;
+    *)
+      install_branches+=("${STEAM_BETA_BRANCH}" "")
+      ;;
+  esac
 
   for branch in "${install_branches[@]}"; do
     if [[ -n "${branch}" ]]; then
@@ -278,11 +281,62 @@ WORLD_BUCKET='{{WORLD_BUCKET}}'
 WORLD_PREFIX='{{WORLD_PREFIX}}'
 STATE_DIR_PATH='{{STATE_DIR_PATH}}'
 GAMECONFIG_LOCAL_PATH='{{GAMECONFIG_LOCAL_PATH}}'
+GAMECONFIG_S3_KEY='{{GAMECONFIG_S3_KEY}}'
 if [[ -n "${WORLD_BUCKET}" ]] && [[ -n "${WORLD_PREFIX}" ]]; then
   aws s3 sync "${STATE_DIR_PATH}/" "s3://${WORLD_BUCKET}/${WORLD_PREFIX}/state/" --delete || true
 fi
-if [[ -n "${GAMECONFIG_LOCAL_PATH}" ]] && [[ -f "${GAMECONFIG_LOCAL_PATH}" ]]; then
+if [[ -n "${GAMECONFIG_LOCAL_PATH}" ]] && [[ -n "${GAMECONFIG_S3_KEY}" ]] && [[ -f "${GAMECONFIG_LOCAL_PATH}" ]]; then
   aws s3 cp "${GAMECONFIG_LOCAL_PATH}" "s3://${WORLD_BUCKET}/${GAMECONFIG_S3_KEY}" || true
+fi
+EOS
+
+cat > "/opt/${GAME_SERVICE}-tools/idle-shutdown.sh" <<'EOS'
+#!/usr/bin/env bash
+set -euo pipefail
+GAME_SERVICE='{{GAME_SERVICE}}'
+IDLE_LIMIT_SECONDS=1200
+LOG_FILE="/var/log/${GAME_SERVICE}/server.log"
+STATE_DIR="/var/lib/${GAME_SERVICE}"
+STATE_FILE="${STATE_DIR}/zero-player-since"
+
+mkdir -p "${STATE_DIR}"
+
+if ! systemctl is-active --quiet "${GAME_SERVICE}-server.service"; then
+  rm -f "${STATE_FILE}"
+  exit 0
+fi
+
+if [[ ! -f "${LOG_FILE}" ]] || ! grep -q "StartGame done" "${LOG_FILE}"; then
+  exit 0
+fi
+
+latest_ply="$(
+  tac "${LOG_FILE}" | grep -m1 -oE 'Ply: [0-9]+' | awk '{print $2}' || true
+)"
+
+if [[ -z "${latest_ply}" ]]; then
+  exit 0
+fi
+
+now="$(date +%s)"
+if [[ "${latest_ply}" != "0" ]]; then
+  rm -f "${STATE_FILE}"
+  exit 0
+fi
+
+if [[ ! -f "${STATE_FILE}" ]]; then
+  printf '%s\n' "${now}" > "${STATE_FILE}"
+  exit 0
+fi
+
+zero_since="$(cat "${STATE_FILE}" 2>/dev/null || echo "${now}")"
+if (( now - zero_since >= IDLE_LIMIT_SECONDS )); then
+  echo "No players for at least ${IDLE_LIMIT_SECONDS}s; backing up and terminating instance."
+  "/opt/{{GAME_SERVICE}}-tools/upload-state.sh" || true
+  systemctl stop "${GAME_SERVICE}-server.service" || true
+  instance_id="$(curl -fsS http://169.254.169.254/latest/meta-data/instance-id)"
+  region="$(curl -fsS http://169.254.169.254/latest/dynamic/instance-identity/document | sed -n 's/.*"region"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+  aws ec2 terminate-instances --region "${region}" --instance-ids "${instance_id}" || shutdown -h now
 fi
 EOS
 
@@ -348,11 +402,106 @@ fi
 if [[ ! -f "${GAMECONFIG_LOCAL_PATH}" ]]; then
   cat <<XML > "${GAMECONFIG_LOCAL_PATH}"
 <ServerSettings>
+  <!-- Server representation -->
+  <property name="ServerName" value="7d2d Spot" />
+  <property name="ServerDescription" value="Personal 7 Days to Die server" />
+  <property name="ServerWebsiteURL" value="" />
+  <property name="ServerPassword" value="" />
+  <property name="ServerLoginConfirmationText" value="" />
+  <property name="Region" value="NorthAmericaEast" />
+  <property name="Language" value="English" />
+
+  <!-- Networking -->
+  <property name="ServerPort" value="26900" />
+  <property name="ServerVisibility" value="2" />
+  <property name="ServerDisabledNetworkProtocols" value="SteamNetworking" />
+  <property name="ServerMaxPlayerCount" value="8" />
+  <property name="ServerReservedSlots" value="0" />
+  <property name="ServerReservedSlotsPermission" value="100" />
+  <property name="ServerAdminSlots" value="0" />
+  <property name="ServerAdminSlotsPermission" value="0" />
+  <property name="ServerMaxWorldTransferSpeedKiBs" value="1024" />
+  <property name="ServerMaxAllowedViewDistance" value="12" />
+  <property name="ServerAllowCrossplay" value="true" />
+  <property name="HideCommandExecutionLog" value="0" />
+
+  <!-- Slots and identity -->
+  <property name="UserDataFolder" value="" />
+  <property name="PersistentPlayerProfiles" value="false" />
+  <property name="MaxUncoveredMapChunksPerPlayer" value="131072" />
+
+  <!-- Security -->
+  <property name="EACEnabled" value="true" />
+  <property name="IgnoreEOSSanctions" value="false" />
+
+  <!-- World -->
+  <property name="GameWorld" value="Navezgane" />
+  <property name="WorldGenSeed" value="asdf" />
+  <property name="WorldGenSize" value="6144" />
+  <property name="GameName" value="MyGame" />
+  <property name="GameMode" value="GameModeSurvival" />
+  <property name="GameDifficulty" value="2" />
+
+  <!-- Time -->
+  <property name="DayNightLength" value="60" />
+  <property name="DayLightLength" value="18" />
+  <property name="DayCount" value="1" />
+
+  <!-- Blood moon -->
   <property name="BloodMoonFrequency" value="7" />
   <property name="BloodMoonRange" value="2" />
-  <property name="DropOnDeath" value="2" />
-  <property name="PlayerKillingMode" value="2" />
+  <property name="BloodMoonWarning" value="8" />
+  <property name="BloodMoonEnemyCount" value="8" />
+
+  <!-- Zombies and animals -->
+  <property name="EnemySpawnMode" value="true" />
+  <property name="EnemyDifficulty" value="0" />
+  <property name="ZombieMove" value="0" />
+  <property name="ZombieMoveNight" value="3" />
+  <property name="ZombieFeralMove" value="3" />
+  <property name="ZombieBMMove" value="3" />
+  <property name="ZombieFeralSense" value="0" />
+  <property name="MaxSpawnedZombies" value="64" />
+  <property name="MaxSpawnedAnimals" value="50" />
+
+  <!-- Progression and loot -->
+  <property name="XPMultiplier" value="100" />
+  <property name="LootAbundance" value="100" />
+  <property name="LootRespawnDays" value="7" />
+  <property name="AirDropFrequency" value="72" />
   <property name="AirDropMarker" value="true" />
+  <property name="PartySharedKillRange" value="100" />
+
+  <!-- Player rules -->
+  <property name="PlayerSafeZoneLevel" value="5" />
+  <property name="PlayerSafeZoneHours" value="5" />
+  <property name="BuildCreate" value="false" />
+  <property name="DeathPenalty" value="1" />
+  <property name="DropOnDeath" value="2" />
+  <property name="DropOnQuit" value="0" />
+  <property name="BedrollDeadZoneSize" value="15" />
+  <property name="BedrollExpiryTime" value="45" />
+  <property name="PlayerKillingMode" value="2" />
+
+  <!-- Land claim -->
+  <property name="LandClaimCount" value="3" />
+  <property name="LandClaimSize" value="41" />
+  <property name="LandClaimDeadZone" value="30" />
+  <property name="LandClaimExpiryTime" value="7" />
+  <property name="LandClaimDecayMode" value="0" />
+  <property name="LandClaimOnlineDurabilityModifier" value="4" />
+  <property name="LandClaimOfflineDurabilityModifier" value="4" />
+  <property name="LandClaimOfflineDelay" value="0" />
+
+  <!-- Dynamic mesh -->
+  <property name="DynamicMeshEnabled" value="true" />
+  <property name="DynamicMeshLandClaimOnly" value="true" />
+  <property name="DynamicMeshLandClaimBuffer" value="3" />
+  <property name="DynamicMeshMaxItemCache" value="3" />
+
+  <!-- Twitch integration -->
+  <property name="TwitchServerPermission" value="90" />
+  <property name="TwitchBloodMoonAllowed" value="false" />
 </ServerSettings>
 XML
 fi
@@ -382,6 +531,7 @@ EOS
 
 chmod +x "/opt/${GAME_SERVICE}-tools/restore-state.sh" \
   "/opt/${GAME_SERVICE}-tools/upload-state.sh" \
+  "/opt/${GAME_SERVICE}-tools/idle-shutdown.sh" \
   "/opt/${GAME_SERVICE}-tools/spot-watchdog.sh" \
   "/opt/${GAME_SERVICE}-tools/stop-server.command" \
   "/opt/${GAME_SERVICE}-tools/start-server.command"
@@ -458,6 +608,28 @@ Persistent=true
 WantedBy=timers.target
 BACKUP_TIMER
 
+cat > "/etc/systemd/system/${GAME_SERVICE}-idle-shutdown.service" <<IDLE_SERVICE
+[Unit]
+Description=${GAME_NAME} idle player shutdown check
+
+[Service]
+Type=oneshot
+ExecStart=/opt/${GAME_SERVICE}-tools/idle-shutdown.sh
+IDLE_SERVICE
+
+cat > "/etc/systemd/system/${GAME_SERVICE}-idle-shutdown.timer" <<IDLE_TIMER
+[Unit]
+Description=${GAME_NAME} idle player shutdown timer
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+IDLE_TIMER
+
 systemctl daemon-reload
 configure_cloudwatch_agent
 restore_state
@@ -482,8 +654,10 @@ SYSCTL
 sysctl -p /etc/sysctl.d/99-${GAME_SERVICE}.conf || true
 
 systemctl enable "${GAME_SERVICE}-server.service" "${GAME_SERVICE}-watchdog.service" "${GAME_SERVICE}-backup.timer"
+systemctl enable "${GAME_SERVICE}-idle-shutdown.timer"
 systemctl start "${GAME_SERVICE}-server.service"
 systemctl start "${GAME_SERVICE}-backup.timer"
+systemctl start "${GAME_SERVICE}-idle-shutdown.timer"
 
 cat <<INFO
 {{GAME_NAME}} bootstrap complete.

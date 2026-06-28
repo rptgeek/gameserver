@@ -169,6 +169,7 @@ export interface InstanceCreateRequest {
   selectedProfileId?: string;
   selectedWorldId?: string;
   worldName?: string;
+  steamBetaBranch?: string;
   serverName?: string;
   subnetIds?: string[];
   amiId?: string;

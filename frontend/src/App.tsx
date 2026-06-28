@@ -14,6 +14,7 @@ import {
   getInstance,
   getLogs,
   getOperation,
+  getPlayerStatus,
   getWorldServerConfig,
   listProfiles,
   listWorlds,
@@ -33,6 +34,7 @@ import type {
   GameProfile,
   LogType,
   OperationResult,
+  PlayerStatus,
   ServerInstance,
   ToastType,
   WorldPreset,
@@ -53,6 +55,7 @@ interface InstanceForm {
   selectedProfileId: string;
   selectedWorldId: string;
   worldName: string;
+  steamBetaBranch: string;
 }
 
 interface WorldRuntimeState {
@@ -131,6 +134,13 @@ function worldBucket(world: WorldPreset, profiles: GameProfile[]): string {
   return typeof profileBucket === 'string' ? profileBucket : '7d2d-state-prod';
 }
 
+function playerSummary(status?: PlayerStatus): string {
+  if (!status) {
+    return '—';
+  }
+  return `${status.playerCount}`;
+}
+
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -147,6 +157,7 @@ export default function App() {
 
   const [detailTab, setDetailTab] = useState<DetailTab>('overview');
   const [operations, setOperations] = useState<Record<string, OperationResult>>({});
+  const [playerStatuses, setPlayerStatuses] = useState<Record<string, PlayerStatus>>({});
 
   const [configText, setConfigText] = useState('{}');
   const [configMode, setConfigMode] = useState<'apply' | 'applyAndRestart'>('apply');
@@ -169,6 +180,7 @@ export default function App() {
     selectedProfileId: '',
     selectedWorldId: '',
     worldName: '',
+    steamBetaBranch: 'latest_experimental',
   });
   const [profiles, setProfiles] = useState<GameProfile[]>([]);
   const [worlds, setWorlds] = useState<WorldPreset[]>([]);
@@ -249,6 +261,28 @@ export default function App() {
     } finally {
       setInstancesLoading(false);
     }
+  };
+
+  const refreshPlayerStatuses = async (sourceInstances = instances) => {
+    const activeInstances = sourceInstances.filter((instance) => {
+      const status = normalizeStatus(instance.status);
+      return status === 'running' || status === 'launching' || status === 'restoring' || status === 'starting';
+    });
+    if (activeInstances.length === 0) {
+      return;
+    }
+    const results = await Promise.allSettled(
+      activeInstances.map((instance) => getPlayerStatus(instanceId(instance))),
+    );
+    setPlayerStatuses((current) => {
+      const next = { ...current };
+      results.forEach((result) => {
+        if (result.status === 'fulfilled') {
+          next[result.value.instanceId] = result.value;
+        }
+      });
+      return next;
+    });
   };
 
   const pollOperation = (id: string, operationId: string) => {
@@ -353,6 +387,18 @@ export default function App() {
       setSelectedInstance(latest);
     }
   }, [instances]);
+
+  useEffect(() => {
+    if (!user) {
+      return;
+    }
+    void refreshPlayerStatuses();
+    const timer = window.setInterval(() => {
+      void refreshInstances(selectedGameId === 'all' ? undefined : selectedGameId);
+      void refreshPlayerStatuses();
+    }, 5 * 60 * 1000);
+    return () => clearInterval(timer);
+  }, [user, selectedGameId, instances.length]);
 
   useEffect(() => {
     if (!selectedInstance || detailTab !== 'config') {
@@ -529,6 +575,7 @@ export default function App() {
       selectedProfileId: '',
       selectedWorldId: '',
       worldName: '',
+      steamBetaBranch: 'latest_experimental',
     });
     setProfileName('');
     setProfileDescription('');
@@ -573,6 +620,7 @@ export default function App() {
       selectedProfileId: '',
       selectedWorldId: world.worldId,
       worldName: world.name,
+      steamBetaBranch: 'latest_experimental',
     });
     setProfileName('');
     setProfileDescription('');
@@ -611,6 +659,7 @@ export default function App() {
         selectedProfileId: addForm.selectedProfileId || undefined,
         selectedWorldId: addForm.selectedWorldId || undefined,
         worldName: addForm.worldName || undefined,
+        steamBetaBranch: addForm.steamBetaBranch,
       });
       setInstances((current) => [created, ...current]);
       setShowAddInstance(false);
@@ -649,6 +698,7 @@ export default function App() {
         selectedProfileId: defaultProfile?.profileId,
         selectedWorldId: world.worldId,
         worldName: world.name,
+        steamBetaBranch: 'latest_experimental',
       });
       setInstances((current) => [created, ...current]);
       setSelectedInstance(created);
@@ -875,6 +925,7 @@ export default function App() {
               {visibleWorlds.map((world) => {
                 const runtime = worldRuntimeState(world);
                 const active = runtime.status !== 'offline';
+                const status = runtime.instance ? playerStatuses[instanceId(runtime.instance)] : undefined;
                 return (
                   <article className="world-card" key={world.worldId}>
                     <div className="world-card-head">
@@ -893,6 +944,10 @@ export default function App() {
                       <strong>{prettyDate(runtime.lastBackupAt)}</strong>
                       <span>Public IP</span>
                       <strong>{runtime.publicIp || '—'}</strong>
+                      <span>Players</span>
+                      <strong>{playerSummary(status)}</strong>
+                      <span>Player check</span>
+                      <strong>{prettyDate(status?.lastUpdatedAt)}</strong>
                     </div>
                     <div className="row-actions">
                       <button
@@ -1102,6 +1157,14 @@ export default function App() {
                       <span className={statusClassName(selectedInstance.status)}>{normalizeStatus(selectedInstance.status)}</span>
                     </div>
                     <div className="kv">
+                      <span>Players</span>
+                      <strong>{playerSummary(playerStatuses[instanceId(selectedInstance)])}</strong>
+                    </div>
+                    <div className="kv">
+                      <span>Player check</span>
+                      <strong>{prettyDate(playerStatuses[instanceId(selectedInstance)]?.lastUpdatedAt)}</strong>
+                    </div>
+                    <div className="kv">
                       <span>Instance type</span>
                       <strong>{instanceType(selectedInstance)}</strong>
                     </div>
@@ -1215,6 +1278,7 @@ export default function App() {
                     selectedProfileId: '',
                     selectedWorldId: '',
                     worldName: '',
+                    steamBetaBranch: previous.steamBetaBranch || 'latest_experimental',
                   }))
                 }
               >
@@ -1224,6 +1288,21 @@ export default function App() {
                     {game.name}
                   </option>
                 ))}
+              </select>
+            </label>
+            <label>
+              Game branch
+              <select
+                value={addForm.steamBetaBranch}
+                onChange={(event) =>
+                  setAddForm((previous) => ({
+                    ...previous,
+                    steamBetaBranch: event.target.value,
+                  }))
+                }
+              >
+                <option value="latest_experimental">Experimental/latest</option>
+                <option value="public">Public/stable</option>
               </select>
             </label>
             <label>

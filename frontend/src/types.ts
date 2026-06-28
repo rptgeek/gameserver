@@ -45,6 +45,13 @@ export interface WorldServerConfig {
   configXml: string;
 }
 
+export interface PlayerStatus {
+  instanceId: string;
+  playerCount: number;
+  players: string[];
+  lastUpdatedAt?: string;
+}
+
 export interface ServerInstance {
   id: string;
   instanceId?: string;

@@ -1,13 +1,102 @@
 <ServerSettings>
+  <!-- Server representation -->
   <property name="ServerName" value="7d2d Spot" />
+  <property name="ServerDescription" value="Personal 7 Days to Die server" />
+  <property name="ServerWebsiteURL" value="" />
   <property name="ServerPassword" value="" />
-  <property name="ServerMaxPlayerCount" value="8" />
+  <property name="ServerLoginConfirmationText" value="" />
+  <property name="Region" value="NorthAmericaEast" />
+  <property name="Language" value="English" />
+
+  <!-- Networking -->
   <property name="ServerPort" value="26900" />
+  <property name="ServerVisibility" value="2" />
+  <property name="ServerDisabledNetworkProtocols" value="SteamNetworking" />
+  <property name="ServerMaxPlayerCount" value="8" />
+  <property name="ServerReservedSlots" value="0" />
+  <property name="ServerReservedSlotsPermission" value="100" />
+  <property name="ServerAdminSlots" value="0" />
+  <property name="ServerAdminSlotsPermission" value="0" />
+  <property name="ServerMaxWorldTransferSpeedKiBs" value="1024" />
+  <property name="ServerMaxAllowedViewDistance" value="12" />
+  <property name="ServerAllowCrossplay" value="true" />
+  <property name="HideCommandExecutionLog" value="0" />
+
+  <!-- Slots and identity -->
+  <property name="UserDataFolder" value="" />
+  <property name="PersistentPlayerProfiles" value="false" />
+  <property name="MaxUncoveredMapChunksPerPlayer" value="131072" />
+
+  <!-- Security -->
+  <property name="EACEnabled" value="true" />
+  <property name="IgnoreEOSSanctions" value="false" />
+
+  <!-- World -->
   <property name="GameWorld" value="Navezgane" />
-  <property name="GameName" value="7d2d" />
+  <property name="WorldGenSeed" value="asdf" />
+  <property name="WorldGenSize" value="6144" />
+  <property name="GameName" value="MyGame" />
+  <property name="GameMode" value="GameModeSurvival" />
+  <property name="GameDifficulty" value="2" />
+
+  <!-- Time -->
+  <property name="DayNightLength" value="60" />
+  <property name="DayLightLength" value="18" />
+  <property name="DayCount" value="1" />
+
+  <!-- Blood moon -->
   <property name="BloodMoonFrequency" value="7" />
   <property name="BloodMoonRange" value="2" />
-  <property name="DropOnDeath" value="2" />
-  <property name="PlayerKillingMode" value="2" />
+  <property name="BloodMoonWarning" value="8" />
+  <property name="BloodMoonEnemyCount" value="8" />
+
+  <!-- Zombies and animals -->
+  <property name="EnemySpawnMode" value="true" />
+  <property name="EnemyDifficulty" value="0" />
+  <property name="ZombieMove" value="0" />
+  <property name="ZombieMoveNight" value="3" />
+  <property name="ZombieFeralMove" value="3" />
+  <property name="ZombieBMMove" value="3" />
+  <property name="ZombieFeralSense" value="0" />
+  <property name="MaxSpawnedZombies" value="64" />
+  <property name="MaxSpawnedAnimals" value="50" />
+
+  <!-- Progression and loot -->
+  <property name="XPMultiplier" value="100" />
+  <property name="LootAbundance" value="100" />
+  <property name="LootRespawnDays" value="7" />
+  <property name="AirDropFrequency" value="72" />
   <property name="AirDropMarker" value="true" />
+  <property name="PartySharedKillRange" value="100" />
+
+  <!-- Player rules -->
+  <property name="PlayerSafeZoneLevel" value="5" />
+  <property name="PlayerSafeZoneHours" value="5" />
+  <property name="BuildCreate" value="false" />
+  <property name="DeathPenalty" value="1" />
+  <property name="DropOnDeath" value="2" />
+  <property name="DropOnQuit" value="0" />
+  <property name="BedrollDeadZoneSize" value="15" />
+  <property name="BedrollExpiryTime" value="45" />
+  <property name="PlayerKillingMode" value="2" />
+
+  <!-- Land claim -->
+  <property name="LandClaimCount" value="3" />
+  <property name="LandClaimSize" value="41" />
+  <property name="LandClaimDeadZone" value="30" />
+  <property name="LandClaimExpiryTime" value="7" />
+  <property name="LandClaimDecayMode" value="0" />
+  <property name="LandClaimOnlineDurabilityModifier" value="4" />
+  <property name="LandClaimOfflineDurabilityModifier" value="4" />
+  <property name="LandClaimOfflineDelay" value="0" />
+
+  <!-- Dynamic mesh -->
+  <property name="DynamicMeshEnabled" value="true" />
+  <property name="DynamicMeshLandClaimOnly" value="true" />
+  <property name="DynamicMeshLandClaimBuffer" value="3" />
+  <property name="DynamicMeshMaxItemCache" value="3" />
+
+  <!-- Twitch integration -->
+  <property name="TwitchServerPermission" value="90" />
+  <property name="TwitchBloodMoonAllowed" value="false" />
 </ServerSettings>

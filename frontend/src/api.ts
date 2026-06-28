@@ -6,6 +6,7 @@ import type {
   LogsResponse,
   LogType,
   OperationResult,
+  PlayerStatus,
   ServerInstance,
   WorldServerConfig,
   WorldPreset,
@@ -295,6 +296,10 @@ export async function getInstance(instanceId: string): Promise<ServerInstance | 
   return (payload as { instance?: ServerInstance }).instance || null;
 }
 
+export async function getPlayerStatus(instanceId: string): Promise<PlayerStatus> {
+  return request<PlayerStatus>(`/v1/instances/${encodeURIComponent(instanceId)}/player-status`);
+}
+
 export async function createInstance(payload: {
   gameId: string;
   region: string;
@@ -302,6 +307,7 @@ export async function createInstance(payload: {
   selectedProfileId?: string;
   selectedWorldId?: string;
   worldName?: string;
+  steamBetaBranch?: string;
 }): Promise<ServerInstance> {
   const result = await request<
     | ServerInstance

@@ -538,6 +538,36 @@ function logStreamNameFor(instanceId: string, source: "bootstrap" | "server"): s
   return `${instanceId}-${source}`;
 }
 
+function parseLatestPlayerStatus(events: Array<{ timestamp?: number; message?: string }>) {
+  let playerCount: number | undefined;
+  let lastUpdatedAt: string | undefined;
+  const players = new Set<string>();
+
+  for (const event of events) {
+    const message = event.message ?? "";
+    const joined = message.match(/GMSG: Player '([^']+)' joined the game/);
+    if (joined?.[1]) {
+      players.add(joined[1]);
+    }
+  }
+
+  for (const event of [...events].reverse()) {
+    const message = event.message ?? "";
+    const match = message.match(/\bPly:\s*(\d+)\b/);
+    if (match?.[1]) {
+      playerCount = Number(match[1]);
+      lastUpdatedAt = event.timestamp ? new Date(event.timestamp).toISOString() : undefined;
+      break;
+    }
+  }
+
+  return {
+    playerCount: playerCount ?? 0,
+    players: Array.from(players),
+    lastUpdatedAt,
+  };
+}
+
 function worldPrefixToken(world: string): string {
   return `${sanitizeToken(world)}${world ? "" : randomUUID().slice(0, 12)}`;
 }
@@ -1036,7 +1066,7 @@ async function createInstancesForSpec(
     gameConfigS3Key: worldConfigKey(worldPrefix),
     gameConfigLocalPath: profile.gameConfigLocalPath || `/opt/${profile.gameName || gameId}/serverconfig.xml`,
     stateLink: profile.stateLink,
-    steamBetaBranch: profile.steamBetaBranch || "",
+    steamBetaBranch: spec.steamBetaBranch || profile.steamBetaBranch || "",
     steamBetaPassword: profile.steamBetaPassword || "",
     backupIntervalMinutes: asPositiveInt(profile.backupIntervalMinutes, 5),
     stopTimeoutSeconds: asPositiveInt(profile.stopTimeoutSeconds, 30),
@@ -1113,6 +1143,7 @@ async function createInstancesForSpec(
         },
       },
       BlockDeviceMappings: blockDevices,
+      InstanceInitiatedShutdownBehavior: "terminate",
       UserData: userData,
       TagSpecifications: [
         {
@@ -1923,6 +1954,10 @@ export function createRouter(): Router {
                 : undefined,
             worldName:
               typeof rawSpec.worldName === "string" ? rawSpec.worldName.trim() : undefined,
+            steamBetaBranch:
+              typeof rawSpec.steamBetaBranch === "string"
+                ? rawSpec.steamBetaBranch.trim()
+                : undefined,
           };
           const created = await createInstancesForSpec(authReq, spec);
           allIds.push(...created);
@@ -2022,6 +2057,44 @@ export function createRouter(): Router {
         action === "restart" || action === "terminate",
       );
       res.json(operation);
+    }),
+  );
+
+  router.get(
+    "/v1/instances/:instanceId/player-status",
+    withAsync(async (req, res) => {
+      const instanceId = req.params.instanceId;
+      try {
+        const response = await logsClient.send(
+          new GetLogEventsCommand({
+            logGroupName: config.logs.serverPrefix,
+            logStreamName: logStreamNameFor(instanceId, "server"),
+            limit: 500,
+            startFromHead: false,
+          }),
+        );
+        const status = parseLatestPlayerStatus(
+          (response.events ?? []).map((event) => ({
+            timestamp: event.timestamp,
+            message: event.message,
+          })),
+        );
+        res.json({
+          instanceId,
+          ...status,
+        });
+      } catch (error) {
+        if (error instanceof ResourceNotFoundException) {
+          res.json({
+            instanceId,
+            playerCount: 0,
+            players: [],
+            lastUpdatedAt: undefined,
+          });
+          return;
+        }
+        throw error;
+      }
     }),
   );
 

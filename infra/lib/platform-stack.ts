@@ -252,6 +252,15 @@ export class PlatformInfraStack extends cdk.Stack {
       }),
     );
 
+    backendLambdaRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'WorldConfigS3ListAccess',
+        effect: iam.Effect.ALLOW,
+        actions: ['s3:ListBucket'],
+        resources: ['arn:aws:s3:::*'],
+      }),
+    );
+
     const bootstrapDocument = new ssm.CfnDocument(this, '7d2dBootstrapDocument', {
       documentType: 'Command',
       name: bootstrapDocumentName,
