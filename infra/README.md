@@ -6,7 +6,7 @@ This folder contains a TypeScript AWS CDK scaffold for the deployment baseline r
 
 - Cognito User Pool with hosted UI client/domain and callback/logout placeholders.
 - API Gateway HTTP API with Cognito JWT authorizer and proxy integration to backend.
-- ECS Fargate backend service behind ALB (supports long-running backend calls and streaming-style traffic patterns through container runtime).
+- API backend is a Lambda function behind HTTP API Gateway and Cognito (no ECS/Fargate dependency in this stack).
 - S3 website bucket with CloudFront distribution for frontend hosting.
 - DynamoDB tables:
   - `games`
@@ -53,11 +53,9 @@ The stack reads values from both environment variables and `cdk.json` context:
 - `BACKEND_IMAGE`, `BACKEND_CONTAINER_PORT`, `BACKEND_CPU`, `BACKEND_MEMORY_MIB`, `BACKEND_DESIRED_COUNT`, `BACKEND_HEALTH_CHECK_PATH`
 - `BACKEND_CONTAINER_ENV` for backend container environment overrides
 
-## Logs migration note (bootstrap runtime -> CloudWatch Logs)
+## Logs note (bootstrap runtime -> CloudWatch Logs)
 
-- Backend container logs are already routed through ECS `awslogs` to `/aws/ecs/<project>-<stage>-backend` with 7-day retention.
-- If bootstrap/runtime init logic currently writes to local files, migrate to stdout or explicit logging by:
-  - Keeping bootstrap output in `console.log`/`console.error`, and
-  - Ensuring bootstrap command runs in the same ECS task definition that uses the `awslogs` log driver.
-- For stricter migration, add a bootstrap wrapper command that streams structured JSON to stdout so existing CW Logs insight queries can be reused without parsing file artifacts.
-
+- Backend logs are emitted from the Lambda runtime.
+- Game bootstrap and server logs are streamed from EC2 userdata via the generated instance user-data configuration to:
+  - `${bootstrapPrefix}/${instanceId}`
+  - `${serverPrefix}/${instanceId}`

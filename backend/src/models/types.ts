@@ -6,11 +6,21 @@ export interface GameItem {
   kind: "game";
   name?: string;
   title?: string;
+  configSchema?: ConfigField[];
   description?: string;
   createdAt: string;
   updatedAt: string;
   ownerUserId?: string;
   metadata?: Record<string, unknown>;
+}
+
+export interface ConfigField {
+  key: string;
+  label: string;
+  type: "string" | "number" | "boolean" | "select";
+  description?: string;
+  default?: unknown;
+  options?: string[];
 }
 
 export interface GameProfileItem {
@@ -21,6 +31,35 @@ export interface GameProfileItem {
   name: string;
   description?: string;
   config: Record<string, unknown>;
+  instanceType?: string;
+  defaultInstanceType?: string;
+  amiId?: string;
+  subnetIds?: string[];
+  securityGroupIds?: string[];
+  keyName?: string;
+  iamInstanceProfile?: string;
+  worldBucket?: string;
+  s3Prefix?: string;
+  worldBucketRegion?: string;
+  gameInstallCmd?: string;
+  gameStartCmd?: string;
+  udpPorts?: string[];
+  tcpPorts?: string[];
+  ingressCidr?: string;
+  backupIntervalMinutes?: number;
+  gameName?: string;
+  gameHome?: string;
+  steamBetaBranch?: string;
+  steamBetaPassword?: string;
+  gameStateDirPath?: string;
+  gameConfigS3Key?: string;
+  gameConfigLocalPath?: string;
+  stateLink?: string;
+  volumeSizeGiB?: number;
+  stopTimeoutSeconds?: number;
+  spotPriceBumpPercent?: number;
+  ensureSecurityGroupRules?: boolean;
+  profileEnv?: Record<string, string>;
   worldId?: string;
   createdAt: string;
   updatedAt: string;
@@ -35,6 +74,10 @@ export interface WorldPresetItem {
   name: string;
   description?: string;
   worldSeed?: Record<string, unknown>;
+  lockedAt?: string;
+  currentInstanceId?: string;
+  currentInstanceGameId?: string;
+  worldPrefix?: string;
   createdAt: string;
   updatedAt: string;
   createdBy?: string;
@@ -46,6 +89,13 @@ export interface InstanceItem {
   gameId: string;
   ec2State?: InstanceState;
   status?: string;
+  availabilityZone?: string;
+  spotPriceAtLaunch?: string;
+  lastBackupAt?: string;
+  serverName?: string;
+  worldBucket?: string;
+  worldS3Prefix?: string;
+  worldPrefix?: string;
   createdBy?: string;
   createdAt: string;
   updatedAt: string;
@@ -59,6 +109,7 @@ export interface InstanceItem {
   selectedWorldId?: string;
   worldName?: string;
   profileType?: "bootstrap" | "update";
+  backupState?: "idle" | "requested" | "running" | "failed";
 }
 
 export interface OperationItem {
@@ -116,8 +167,11 @@ export interface InstanceCreateRequest {
   selectedProfileId?: string;
   selectedWorldId?: string;
   worldName?: string;
+  serverName?: string;
+  subnetIds?: string[];
   amiId?: string;
   instanceType?: string;
+  spotPriceBumpPercent?: number;
   subnetId?: string;
   keyName?: string;
   securityGroupIds?: string[];
@@ -137,7 +191,25 @@ export interface LogSourceQuery {
 export interface SaveProfileRequest {
   name: string;
   description?: string;
-  config: Record<string, unknown>;
+  config?: Record<string, unknown>;
+  profileEnv?: Record<string, string>;
+  worldBucket?: string;
+  s3Prefix?: string;
+  worldBucketRegion?: string;
+  amiId?: string;
+  defaultInstanceType?: string;
+  instanceType?: string;
+  subnetIds?: string[];
+  securityGroupIds?: string[];
+  keyName?: string;
+  iamInstanceProfile?: string;
+  gameInstallCmd?: string;
+  gameStartCmd?: string;
+  udpPorts?: string[];
+  tcpPorts?: string[];
+  ingressCidr?: string;
+  backupIntervalMinutes?: number;
+  stopTimeoutSeconds?: number;
   worldId?: string;
 }
 

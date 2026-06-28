@@ -20,7 +20,7 @@ export const config = {
     instances: process.env.DYNAMO_TABLE_INSTANCES ?? process.env.INSTANCES_TABLE_NAME ?? "instances",
     operations: process.env.DYNAMO_TABLE_OPERATIONS ?? process.env.OPERATIONS_TABLE_NAME ?? "operations",
     configHistory: process.env.DYNAMO_TABLE_CONFIG_HISTORY ?? process.env.CONFIG_HISTORY_TABLE_NAME ?? "config_history",
-    instanceConfig: process.env.DYNAMO_TABLE_INSTANCE_CONFIG ?? process.env.INSTANCE_CONFIG_TABLE_NAME ?? "config_history",
+    instanceConfig: process.env.DYNAMO_TABLE_INSTANCE_CONFIG ?? process.env.INSTANCE_CONFIG_TABLE_NAME ?? "instance_config",
   },
 
   ec2: {
@@ -36,6 +36,7 @@ export const config = {
   ssm: {
     bootstrapDocumentName: process.env.SSM_BOOTSTRAP_DOCUMENT ?? "7d2d-bootstrap",
     updateDocumentName: process.env.SSM_UPDATE_DOCUMENT ?? "7d2d-update",
+    backupDocumentName: process.env.SSM_BACKUP_DOCUMENT ?? "7d2d-backup",
   },
 
   logs: {

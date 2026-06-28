@@ -12,6 +12,7 @@ import * as logs from 'aws-cdk-lib/aws-logs';
 import * as lambdaNodejs from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as s3 from 'aws-cdk-lib/aws-s3';
+import * as ssm from 'aws-cdk-lib/aws-ssm';
 import * as path from 'node:path';
 
 export interface PlatformInfraStackProps extends cdk.StackProps {
@@ -45,6 +46,9 @@ export class PlatformInfraStack extends cdk.Stack {
     const frontendHost = props.frontendDomainName
       ? `https://${props.frontendDomainName}`
       : 'http://localhost:3000';
+    const bootstrapDocumentName = `${prefix}-7d2d-bootstrap`;
+    const updateDocumentName = `${prefix}-7d2d-update`;
+    const backupDocumentName = `${prefix}-7d2d-backup`;
 
     const callbackUrls =
       props.cognitoCallbackUrls && props.cognitoCallbackUrls.length > 0
@@ -73,6 +77,9 @@ export class PlatformInfraStack extends cdk.Stack {
           required: true,
           mutable: true,
         },
+      },
+      customAttributes: {
+        role: new cognito.StringAttribute({ mutable: true }),
       },
     });
 
@@ -138,6 +145,15 @@ export class PlatformInfraStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
+    const instanceConfigTable = new dynamodb.Table(this, 'InstanceConfigTable', {
+      tableName: `${prefix}-instance-config`,
+      partitionKey: { name: 'instanceId', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecovery: true,
+      encryption: dynamodb.TableEncryption.AWS_MANAGED,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
     const backendLambdaRole = new iam.Role(this, 'BackendLambdaRole', {
       assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
       roleName: `${prefix}-backend-lambda-role`,
@@ -167,6 +183,7 @@ export class PlatformInfraStack extends cdk.Stack {
           instancesTable.tableArn,
           operationsTable.tableArn,
           configHistoryTable.tableArn,
+          instanceConfigTable.tableArn,
         ],
       }),
     );
@@ -178,15 +195,28 @@ export class PlatformInfraStack extends cdk.Stack {
         actions: [
           'ec2:DescribeInstances',
           'ec2:DescribeInstanceStatus',
+          'ec2:DescribeSpotPriceHistory',
           'ec2:DescribeImages',
-          'ec2:StartInstances',
+          'ec2:DescribeSubnets',
+          'ec2:RunInstances',
           'ec2:StopInstances',
+          'ec2:TerminateInstances',
+          'ec2:StartInstances',
           'ec2:RebootInstances',
           'ec2:CreateTags',
         ],
         resources: [
           `arn:aws:ec2:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:instance/*`,
         ],
+      }),
+    );
+
+    backendLambdaRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'PassIamRole',
+        effect: iam.Effect.ALLOW,
+        actions: ['iam:PassRole'],
+        resources: ['*'],
       }),
     );
 
@@ -213,6 +243,7 @@ export class PlatformInfraStack extends cdk.Stack {
         effect: iam.Effect.ALLOW,
         actions: [
           'logs:DescribeLogStreams',
+          'logs:GetLogEvents',
           'logs:CreateLogStream',
           'logs:PutLogEvents',
           'logs:CreateLogGroup',
@@ -220,6 +251,89 @@ export class PlatformInfraStack extends cdk.Stack {
         resources: ['*'],
       }),
     );
+
+    const bootstrapDocument = new ssm.CfnDocument(this, '7d2dBootstrapDocument', {
+      documentType: 'Command',
+      name: bootstrapDocumentName,
+      content: {
+        schemaVersion: '2.2',
+        description: 'No-op fallback bootstrap document.',
+        parameters: {
+          action: {
+            type: 'String',
+            description: 'Action selector',
+            default: 'bootstrap',
+          },
+        },
+        mainSteps: [
+          {
+            action: 'aws:runShellScript',
+            name: 'RunNoop',
+            inputs: {
+              runCommand: ['echo "Bootstrap action requested: {{ action }}"'],
+            },
+          },
+        ],
+      },
+    });
+
+    const updateDocument = new ssm.CfnDocument(this, '7d2dUpdateDocument', {
+      documentType: 'Command',
+      name: updateDocumentName,
+      content: {
+        schemaVersion: '2.2',
+        description: 'Generic no-op configuration update fallback document.',
+        parameters: {
+          action: {
+            type: 'String',
+            description: 'Action selector',
+            default: 'update',
+          },
+        },
+        mainSteps: [
+          {
+            action: 'aws:runShellScript',
+            name: 'RunNoop',
+            inputs: {
+              runCommand: ['echo "Config update requested: {{ action }}"'],
+            },
+          },
+        ],
+      },
+    });
+
+    const backupDocument = new ssm.CfnDocument(this, '7d2dBackupDocument', {
+      documentType: 'Command',
+      name: backupDocumentName,
+      content: {
+        schemaVersion: '2.2',
+        description: 'Backup action for 7d2d game worlds.',
+        parameters: {
+          action: {
+            type: 'String',
+            description: 'Action selector',
+            default: 'backup',
+          },
+        },
+        mainSteps: [
+          {
+            action: 'aws:runShellScript',
+            name: 'RunBackup',
+            inputs: {
+              runCommand: [
+                'if ls /opt/*-tools/upload-state.sh >/dev/null 2>&1; then',
+                '  for script in /opt/*-tools/upload-state.sh; do',
+                '    bash "${script}" || true',
+                '  done',
+                'else',
+                '  echo "No upload-state scripts found"',
+                'fi',
+              ],
+            },
+          },
+        ],
+      },
+    });
 
     backendLambdaRole.addToPolicy(
       new iam.PolicyStatement({
@@ -246,6 +360,10 @@ export class PlatformInfraStack extends cdk.Stack {
       INSTANCES_TABLE_NAME: instancesTable.tableName,
       OPERATIONS_TABLE_NAME: operationsTable.tableName,
       CONFIG_HISTORY_TABLE_NAME: configHistoryTable.tableName,
+      INSTANCE_CONFIG_TABLE_NAME: instanceConfigTable.tableName,
+      SSM_BOOTSTRAP_DOCUMENT: bootstrapDocumentName,
+      SSM_UPDATE_DOCUMENT: updateDocumentName,
+      SSM_BACKUP_DOCUMENT: backupDocumentName,
       ...(props.backendEnvironment ?? {}),
     };
 

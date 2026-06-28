@@ -1,20 +1,25 @@
 import { randomUUID } from "crypto";
 import { NextFunction, Request, Response, Router } from "express";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import {
   DescribeInstancesCommand,
+  DescribeSpotPriceHistoryCommand,
+  DescribeSubnetsCommand,
   RebootInstancesCommand,
   RunInstancesCommand,
   StartInstancesCommand,
-  StopInstancesCommand,
   TerminateInstancesCommand,
 } from "@aws-sdk/client-ec2";
 import {
   GetCommandInvocationCommand,
+  GetParameterCommand,
   SendCommandCommand,
 } from "@aws-sdk/client-ssm";
 import {
   CreateLogStreamCommand,
   GetLogEventsCommand,
+  ResourceNotFoundException,
 } from "@aws-sdk/client-cloudwatch-logs";
 import { createRemoteJWKSet, jwtVerify, JWTPayload } from "jose";
 
@@ -142,6 +147,275 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function asPositiveInt(value: unknown, fallback: number): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.round(parsed);
+}
+
+function asIntList(value: unknown): number[] {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => Number(item))
+      .filter((value) => Number.isInteger(value) && value > 0);
+  }
+  if (typeof value === "string") {
+    return parsePortList(value);
+  }
+  return [];
+}
+
+function normalizeTextList(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return typeof value === "string" ? value.split(',').map((entry) => entry.trim()).filter(Boolean) : [];
+  }
+  return value
+    .map((item) => (typeof item === "string" ? item.trim() : String(item)))
+    .filter((item) => item.length > 0);
+}
+
+function shellSingleQuote(value: string): string {
+  return `'${value.replace(/'/g, `'"'"'`)}'`;
+}
+
+function normalizeCsvList(raw: string): string[] {
+  return raw
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+}
+
+function parsePortList(raw: string | undefined): number[] {
+  if (!raw) return [];
+  const items = normalizeCsvList(raw);
+  const ports: number[] = [];
+
+  for (const token of items) {
+    const range = token.split('-').map((entry) => entry.trim()).filter(Boolean);
+    if (range.length === 1) {
+      const value = Number(range[0]);
+      if (Number.isInteger(value) && value > 0) {
+        ports.push(value);
+      }
+      continue;
+    }
+
+    if (range.length !== 2) {
+      continue;
+    }
+
+    const start = Number(range[0]);
+    const end = Number(range[1]);
+    if (!Number.isInteger(start) || !Number.isInteger(end) || start <= 0 || end < start) {
+      continue;
+    }
+
+    for (let port = start; port <= end; port += 1) {
+      ports.push(port);
+    }
+  }
+
+  return [...new Set(ports)];
+}
+
+function parseIntConfig(value: unknown, fallback: number): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.round(parsed);
+}
+
+function sanitizeToken(value: string): string {
+  return value.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+/, "").replace(/-+$/, "");
+}
+
+function normalizeBoolean(value: unknown, fallback: boolean): boolean {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    const lowered = value.toLowerCase();
+    if (["1", "true", "yes", "y", "on"].includes(lowered)) return true;
+    if (["0", "false", "no", "off", ""].includes(lowered)) return false;
+  }
+  return fallback;
+}
+
+async function resolveAmiId(profileAmiId: string | undefined): Promise<string> {
+  const amiId = profileAmiId ?? config.ec2.defaultAmiId;
+  if (!amiId) {
+    throw new Error("No AMI id configured and no AMI id in request");
+  }
+  if (!amiId.startsWith("/aws/service/")) {
+    return amiId;
+  }
+
+  const response = await ssmClient.send(
+    new GetParameterCommand({
+      Name: amiId,
+      WithDecryption: false,
+    }),
+  );
+  const value = response.Parameter?.Value;
+  if (!value) {
+    throw new Error(`Could not resolve AMI parameter ${amiId}`);
+  }
+  return value;
+}
+
+function parseSubnets(profileSubnetIds: string[] = [], specSubnetIds: string[] = [], fallback?: string): string[] {
+  if (specSubnetIds.length > 0) return specSubnetIds;
+  if (profileSubnetIds.length > 0) return profileSubnetIds;
+  if (fallback) return [fallback];
+  return [];
+}
+
+async function resolveSubnetZoneMap(subnetIds: string[]): Promise<Record<string, string>> {
+  if (subnetIds.length === 0) {
+    return {};
+  }
+
+  const response = await ec2Client.send(
+    new DescribeSubnetsCommand({
+      SubnetIds: subnetIds,
+    }),
+  );
+  const map: Record<string, string> = {};
+  for (const subnet of response.Subnets ?? []) {
+    if (subnet.SubnetId && subnet.AvailabilityZone) {
+      map[subnet.SubnetId] = subnet.AvailabilityZone;
+    }
+  }
+  return map;
+}
+
+async function resolveSpotLaunchChoice(
+  subnetIds: string[],
+  instanceType: string,
+  bumpPercent: number,
+): Promise<{ subnetId: string; availabilityZone: string; maxPrice?: string }> {
+  const subnetZoneMap = await resolveSubnetZoneMap(subnetIds);
+  const candidates = subnetIds
+    .map((subnetId) => ({ subnetId, availabilityZone: subnetZoneMap[subnetId] }))
+    .filter((candidate): candidate is { subnetId: string; availabilityZone: string } => Boolean(candidate.availabilityZone));
+
+  if (candidates.length === 0) {
+    throw new Error("No usable subnet/az pair was found for launch");
+  }
+
+  let best: {
+    subnetId: string;
+    availabilityZone: string;
+    basePrice: number;
+    maxPrice?: string;
+  } | undefined;
+
+  for (const candidate of candidates) {
+    const response = await ec2Client.send(
+      new DescribeSpotPriceHistoryCommand({
+        InstanceTypes: [instanceType],
+        ProductDescriptions: ["Linux/UNIX"],
+        AvailabilityZone: candidate.availabilityZone,
+        MaxResults: 1,
+      }),
+    );
+    const first = response.SpotPriceHistory?.[0];
+    const rawPrice = Number(first?.SpotPrice);
+    if (!Number.isFinite(rawPrice)) {
+      continue;
+    }
+    const maxPrice = (rawPrice * (1 + bumpPercent / 100)).toFixed(6);
+
+    if (!best || rawPrice < best.basePrice) {
+      best = {
+        subnetId: candidate.subnetId,
+        availabilityZone: candidate.availabilityZone,
+        basePrice: rawPrice,
+        maxPrice,
+      };
+    }
+  }
+
+  if (!best) {
+    const firstCandidate = candidates[0];
+    return {
+      subnetId: firstCandidate.subnetId,
+      availabilityZone: firstCandidate.availabilityZone,
+    };
+  }
+
+  return {
+    subnetId: best.subnetId,
+    availabilityZone: best.availabilityZone,
+    maxPrice: best.maxPrice,
+  };
+}
+
+function renderBootstrapTemplate(profile: GameProfileItem, worldPrefix: string, gameId: string): string {
+  let template = bootstrapTemplate();
+  const replacements: Record<string, string> = {
+    WORLD_BUCKET: shellSingleQuote(profile.worldBucket || ""),
+    WORLD_BUCKET_REGION: shellSingleQuote(profile.worldBucketRegion || config.awsRegion),
+    WORLD_PREFIX: shellSingleQuote(worldPrefix),
+    GAME_STATE_PREFIX: shellSingleQuote(worldPrefix),
+    GAME_NAME: shellSingleQuote(profile.gameName || gameId),
+    GAME_HOME: shellSingleQuote(profile.gameHome || `/opt/${profile.gameName ?? gameId}`),
+    STATE_DIR_PATH: shellSingleQuote(profile.gameStateDirPath || `/srv/${(profile.gameName || gameId)}-state`),
+    STATE_LINK: shellSingleQuote(profile.stateLink || ""),
+    SERVICE_USER: shellSingleQuote(profile.profileEnv?.SERVICE_USER || "auto"),
+    GAMECONFIG_S3_KEY: shellSingleQuote(profile.gameConfigS3Key || `${worldPrefix}/config/serverconfig.xml`),
+    GAMECONFIG_LOCAL_PATH: shellSingleQuote(profile.gameConfigLocalPath || `/opt/${profile.gameName || gameId}/serverconfig.xml`),
+    BACKUP_INTERVAL_MINUTES: String(asPositiveInt(profile.backupIntervalMinutes, 5)),
+    BACKUP_BOOT_OFFSET_MINUTES: String(asPositiveInt(profile.backupIntervalMinutes, 5)),
+    STOP_TIMEOUT_SECONDS: String(asPositiveInt(profile.stopTimeoutSeconds, 30)),
+    GAME_INSTALL_CMD_B64: shellSingleQuote(Buffer.from(profile.gameInstallCmd || "").toString("base64")),
+    GAME_START_CMD_B64: shellSingleQuote(Buffer.from(profile.gameStartCmd || "").toString("base64")),
+    STEAM_BETA_BRANCH: shellSingleQuote(profile.steamBetaBranch || ""),
+    STEAM_BETA_PASSWORD: shellSingleQuote(profile.steamBetaPassword || ""),
+    GAME_SERVICE: shellSingleQuote(sanitizeToken(profile.gameName || gameId)),
+    GAME_INSTALL_CMD: shellSingleQuote(profile.gameInstallCmd || ""),
+    GAME_START_CMD: shellSingleQuote(profile.gameStartCmd || ""),
+    GAME_UDP_PORTS: String(asIntList(profile.udpPorts).join(',')),
+    GAME_TCP_PORTS: String(asIntList(profile.tcpPorts).join(',')),
+    GAME_INGRESS_CIDR: shellSingleQuote(profile.ingressCidr || "0.0.0.0/0"),
+    SERVER_NAME: shellSingleQuote(`${profile.gameName || gameId}-spot-${randomUUID().slice(0, 6)}`),
+    ENFORCE_BOOTSTRAP_LOG_PREFIX: shellSingleQuote(config.logs.bootstrapPrefix),
+    ENFORCE_SERVER_LOG_PREFIX: shellSingleQuote(config.logs.serverPrefix),
+    WORLD_ID: shellSingleQuote(worldPrefix),
+  };
+
+  for (const [key, value] of Object.entries(replacements)) {
+    template = template.replaceAll(`{{${key}}}`, value);
+  }
+
+  return template;
+}
+
+function bootstrapTemplate(): string {
+  const candidate = path.join(process.cwd(), "infra", "assets", "bootstrap.sh.tmpl");
+  try {
+    return readFileSync(candidate, "utf8");
+  } catch {
+    const fallback = path.join(__dirname, "../../infra/assets/bootstrap.sh.tmpl");
+    return readFileSync(fallback, "utf8");
+  }
+}
+
+function instanceCanBeStarted(ec2State: string | undefined): boolean {
+  if (!ec2State) return false;
+  return ["stopped"].includes(ec2State);
+}
+
+function isTerminalInstanceState(value: string | undefined): boolean {
+  if (!value) return false;
+  return ["terminated", "stopped", "stopping", "shutting-down"].includes(value);
+}
+
+function logStreamNameFor(instanceId: string, source: "bootstrap" | "server"): string {
+  return `${instanceId}-${source}`;
+}
+
+function worldPrefixToken(world: string): string {
+  return `${sanitizeToken(world)}${world ? "" : randomUUID().slice(0, 12)}`;
+}
+
 function profilePk(gameId: string, profileId: string): string {
   return `game-profile#${gameId}#${profileId}`;
 }
@@ -191,12 +465,13 @@ function normalizeLogSource(source: unknown): "bootstrap" | "server" {
 }
 
 function logLocation(instanceId: string, source: "bootstrap" | "server") {
+  const stream = logStreamNameFor(instanceId, source);
   return {
     logGroupName:
       source === "bootstrap"
-        ? `${config.logs.bootstrapPrefix}/${instanceId}`
-        : `${config.logs.serverPrefix}/${instanceId}`,
-    logStreamName: instanceId,
+        ? config.logs.bootstrapPrefix
+        : config.logs.serverPrefix,
+    logStreamName: stream,
   };
 }
 
@@ -222,7 +497,7 @@ async function lookupOperationByIdempotency(
 function expectedEc2State(action: OperationItem["action"]): string | undefined {
   if (action === "start" || action === "reboot" || action === "restart")
     return "running";
-  if (action === "stop") return "stopped";
+  if (action === "stop") return "terminated";
   if (action === "terminate") return "terminated";
   return undefined;
 }
@@ -336,31 +611,41 @@ async function createInstancesForSpec(
   req: AuthenticatedRequest,
   spec: InstanceCreateRequest,
 ): Promise<string[]> {
-  const instanceType = spec.instanceType ?? config.ec2.defaultInstanceType;
-  const imageId = spec.amiId ?? config.ec2.defaultAmiId;
+  const requestConfig = isObject(spec.config) ? spec.config : {};
   const count = Math.min(Math.max(Math.floor(Number(spec.count ?? 1)), 1), 20);
   const gameId = String(spec.gameId);
-
-  if (!imageId) {
-    throw new Error("No AMI id configured and no amiId in request");
-  }
   if (!spec.gameId) {
     throw new Error("Missing gameId");
   }
 
+  const allProfiles = await gameProfilesRepository.scanByPrefix(
+    "pk",
+    `game-profile#${gameId}#`,
+  );
   let selectedProfile: GameProfileItem | undefined;
+  const resolvedProfileId = spec.selectedProfileId?.trim();
   if (spec.selectedProfileId) {
     selectedProfile = await gameProfilesRepository.get(
-      profilePk(gameId, spec.selectedProfileId),
+      profilePk(gameId, resolvedProfileId),
     );
     if (!selectedProfile) {
-      const fallback = (await gameProfilesRepository.scanByPrefix("pk", `game-profile#${gameId}#`))
-        .find((candidate) => candidate.profileId === spec.selectedProfileId);
+      const fallback = allProfiles.find(
+        (candidate) => candidate.profileId === resolvedProfileId,
+      );
       selectedProfile = fallback;
     }
     if (!selectedProfile || selectedProfile.gameId !== gameId) {
-      throw new Error(`Unknown profile id: ${spec.selectedProfileId}`);
+      throw new Error(`Unknown profile id: ${resolvedProfileId}`);
     }
+  } else if (allProfiles.length > 0) {
+    const sortedProfiles = [...allProfiles].sort(
+      (a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""),
+    );
+    selectedProfile = sortedProfiles[0];
+  }
+
+  if (!selectedProfile) {
+    throw new Error(`No launch profile found for gameId ${gameId}`);
   }
 
   let selectedWorld: WorldPresetItem | undefined;
@@ -378,12 +663,150 @@ async function createInstancesForSpec(
     }
   }
 
-  const requestConfig = isObject(spec.config) ? spec.config : {};
   const profileConfig =
     selectedProfile && isObject(selectedProfile.config) ? selectedProfile.config : {};
   const worldSeed =
     selectedWorld && isObject(selectedWorld.worldSeed) ? selectedWorld.worldSeed : undefined;
-  const mergedConfig = { ...profileConfig, ...requestConfig, ...(worldSeed ? { worldSeed } : {}) };
+
+  const profile = {
+    ...selectedProfile,
+    config: profileConfig,
+  };
+
+  if (selectedWorld?.currentInstanceId) {
+    const lockedInstance = await instanceRepository.get(selectedWorld.currentInstanceId);
+    const busyState = lockedInstance?.ec2State;
+    if (lockedInstance && busyState && !isTerminalInstanceState(busyState)) {
+      throw new Error(
+        `World ${selectedWorld.worldId} is already running an active server`,
+      );
+    }
+    if (!lockedInstance || isTerminalInstanceState(busyState)) {
+      await worldPresetsRepository.put({
+        ...selectedWorld,
+        currentInstanceId: undefined,
+        currentInstanceGameId: undefined,
+        lockedAt: undefined,
+        updatedAt: new Date().toISOString(),
+      });
+    }
+  }
+
+  const subnetIds = parseSubnets(
+    selectedProfile?.subnetIds,
+    spec.subnetIds ?? (spec.subnetId ? [spec.subnetId] : []),
+    config.ec2.defaultSubnetId,
+  );
+  if (subnetIds.length === 0) {
+    throw new Error("No subnet configured for launch");
+  }
+
+  const instanceType =
+    spec.instanceType ??
+    profile.instanceType ??
+    profile.defaultInstanceType ??
+    config.ec2.defaultInstanceType;
+  const imageId = await resolveAmiId(spec.amiId ?? profile.amiId);
+
+  const securityGroupIds =
+    normalizeTextList(spec.securityGroupIds ?? profile.securityGroupIds ?? config.ec2.defaultSecurityGroupIds)
+      .filter((id) => id.length > 0)
+      .sort();
+  if (securityGroupIds.length === 0) {
+    throw new Error("No security group configured for launch");
+  }
+
+  const keyName = spec.keyName ?? profile.keyName;
+  const instanceProfileName = profile.iamInstanceProfile;
+  if (!keyName) {
+    throw new Error("KEY_NAME is required to launch an instance");
+  }
+  if (!instanceProfileName) {
+    throw new Error("IAM instance profile is required to launch an instance");
+  }
+  const spotBumpPercent = parseIntConfig(
+    profile.spotPriceBumpPercent ?? spec.spotPriceBumpPercent,
+    25,
+  );
+  const spot = await resolveSpotLaunchChoice(subnetIds, instanceType, spotBumpPercent);
+
+  const basePrefix = profile.s3Prefix ?? "servers";
+  const basePrefixSafe = basePrefix.replace(/\/+$/, "");
+  const worldSuffix = selectedWorld?.worldPrefix
+    ? selectedWorld.worldPrefix
+    : selectedWorld?.worldId
+      ? selectedWorld.worldId
+      : spec.worldName || worldPrefixToken(spec.worldName ?? "");
+  const worldPrefix = `${basePrefixSafe}/${gameId}/${sanitizeToken(worldSuffix)}`;
+  const worldLabel = selectedWorld?.name || spec.worldName || worldSuffix;
+
+  const bootstrapProfile = {
+    worldBucket: profile.worldBucket || "7d2d-state-prod",
+    worldBucketRegion: profile.worldBucketRegion || config.awsRegion,
+    worldPrefix,
+    s3Prefix: basePrefixSafe,
+    gameName: profile.gameName || gameId,
+    gameHome: profile.gameHome || `/opt/${profile.gameName ?? gameId}`,
+    gameInstallCmd: profile.gameInstallCmd || "",
+    gameStartCmd: profile.gameStartCmd || "",
+    gameStateDirPath: profile.gameStateDirPath || `/srv/${profile.gameName || gameId}-state`,
+    gameConfigS3Key: profile.gameConfigS3Key || `${worldPrefix}/config/serverconfig.xml`,
+    gameConfigLocalPath: profile.gameConfigLocalPath || `/opt/${profile.gameName || gameId}/serverconfig.xml`,
+    stateLink: profile.stateLink,
+    steamBetaBranch: profile.steamBetaBranch || "",
+    steamBetaPassword: profile.steamBetaPassword || "",
+    backupIntervalMinutes: asPositiveInt(profile.backupIntervalMinutes, 5),
+    stopTimeoutSeconds: asPositiveInt(profile.stopTimeoutSeconds, 30),
+    udpPorts: profile.udpPorts,
+    tcpPorts: profile.tcpPorts,
+    ingressCidr: profile.ingressCidr || "0.0.0.0/0",
+    profileEnv: profile.profileEnv,
+  };
+
+  const serverName = spec.serverName || spec.worldName || selectedWorld?.name || gameId;
+  const bootstrapScript = renderBootstrapTemplate(
+    bootstrapProfile as GameProfileItem,
+    worldPrefix,
+    gameId,
+  );
+  const userData = Buffer.from(bootstrapScript, "utf8").toString("base64");
+
+  const blockDevices = profile.volumeSizeGiB
+    ? [
+      {
+        DeviceName: "/dev/xvda",
+        Ebs: {
+          VolumeSize: asPositiveInt(profile.volumeSizeGiB, 80),
+          VolumeType: "gp3",
+          Encrypted: true,
+          DeleteOnTermination: true,
+        },
+      },
+    ]
+    : undefined;
+
+  const mergedConfig = {
+    ...(profile.config || {}),
+    ...requestConfig,
+    ...(worldSeed ? { worldSeed } : {}),
+  };
+
+  const now = new Date().toISOString();
+  const basePayload = {
+    gameId: spec.gameId,
+    region: config.awsRegion,
+    worldBucket: profile.worldBucket || "",
+    worldS3Prefix: worldPrefix,
+    worldPrefix,
+    worldName: spec.worldName,
+    worldLabel,
+    availabilityZone: spot.availabilityZone,
+    subnetId: spot.subnetId,
+    securityGroupIds,
+    spotPriceAtLaunch: spot.maxPrice,
+    worldPrefix,
+    serverName,
+  };
 
   const result = await ec2Client.send(
     new RunInstancesCommand({
@@ -391,29 +814,40 @@ async function createInstancesForSpec(
       InstanceType: instanceType,
       MinCount: count,
       MaxCount: count,
-      KeyName: spec.keyName,
-      SubnetId: spec.subnetId ?? config.ec2.defaultSubnetId,
-      SecurityGroupIds:
-        spec.securityGroupIds?.length
-          ? spec.securityGroupIds
-          : config.ec2.defaultSecurityGroupIds,
+      KeyName: keyName,
+      IamInstanceProfile: { Name: instanceProfileName },
+      NetworkInterfaces: [
+        {
+          DeviceIndex: 0,
+          SubnetId: spot.subnetId,
+          AssociatePublicIpAddress: true,
+          Groups: securityGroupIds,
+        },
+      ],
+      InstanceMarketOptions: {
+        MarketType: "spot",
+        SpotOptions: {
+          SpotInstanceType: "one-time",
+          InstanceInterruptionBehavior: "terminate",
+          ...(spot.maxPrice ? { MaxPrice: spot.maxPrice } : {}),
+        },
+      },
+      BlockDeviceMappings: blockDevices,
+      UserData: userData,
       TagSpecifications: [
         {
           ResourceType: "instance",
           Tags: [
             { Key: "GameId", Value: spec.gameId },
             { Key: "ManagedBy", Value: "7d2d-console" },
-            ...(Object.entries(spec.tags ?? {}).map(([key, value]) => ({
-              Key: key,
-              Value: value,
-            })) ?? []),
-            ...(spec.selectedProfileId
-              ? [{ Key: "GameProfileId", Value: spec.selectedProfileId }]
-              : []),
+            { Key: "Name", Value: serverName },
+            ...(Object.entries(spec.tags || {}).map(([key, value]) => ({ Key: key, Value: value }))),
+            { Key: "GameProfileId", Value: selectedProfile.profileId },
             ...(spec.selectedWorldId
               ? [{ Key: "GameWorldId", Value: spec.selectedWorldId }]
               : []),
             ...(spec.worldName ? [{ Key: "WorldName", Value: spec.worldName }] : []),
+            { Key: "WorldPrefix", Value: worldPrefix },
           ],
         },
       ],
@@ -423,31 +857,34 @@ async function createInstancesForSpec(
   const createdIds = (result.Instances ?? [])
     .map((instance) => instance.InstanceId)
     .filter((instanceId): instanceId is string => Boolean(instanceId));
-  const now = new Date().toISOString();
-
+  if (createdIds.length === 0) {
+    throw new Error("No instance ids returned from RunInstances");
+  }
+  
   for (const instanceId of createdIds) {
     await instanceRepository.put({
       pk: instanceId,
       instanceId,
-      gameId: spec.gameId,
-      status: "creating",
+      gameId,
+      status: "launching",
       ec2State: "pending",
       createdBy: req.user.sub,
       createdAt: now,
       updatedAt: now,
+      ...basePayload,
       amiId: imageId,
       instanceType,
-      subnetId: spec.subnetId ?? config.ec2.defaultSubnetId,
-      securityGroupIds:
-        spec.securityGroupIds?.length
-          ? spec.securityGroupIds
-          : config.ec2.defaultSecurityGroupIds,
+      subnetId: spot.subnetId,
+      securityGroupIds,
       tags: { ...(spec.tags ?? {}), gameId: spec.gameId },
-      bootstrapProfile: spec.bootstrapAction ? `requested:${spec.bootstrapAction}` : undefined,
-      profileType: spec.bootstrapAction,
-      selectedProfileId: spec.selectedProfileId,
+      bootstrapProfile: "requested:bootstrap",
+      profileType: "bootstrap",
+      selectedProfileId: selectedProfile.profileId,
       selectedWorldId: spec.selectedWorldId,
       worldName: spec.worldName,
+      serverName,
+      lastBackupAt: undefined,
+      backupState: "idle",
     });
 
     if (Object.keys(mergedConfig).length > 0) {
@@ -459,6 +896,17 @@ async function createInstancesForSpec(
         updatedBy: req.user.sub,
       });
     }
+  }
+
+  if (selectedWorld) {
+    await worldPresetsRepository.put({
+      ...selectedWorld,
+      currentInstanceId: createdIds[0],
+      currentInstanceGameId: gameId,
+      worldPrefix,
+      updatedAt: now,
+      lockedAt: now,
+    });
   }
 
   return createdIds;
@@ -482,19 +930,48 @@ async function readLogEvents(
   limit = 100,
 ) {
   const { logGroupName, logStreamName } = logLocation(instanceId, source);
-  const response = await logsClient.send(
-    new GetLogEventsCommand({
+  const fallbackStreams = [
+    logStreamName,
+    `${instanceId}-${source}`,
+    instanceId,
+  ].filter(Boolean) as string[];
+  let response;
+  let selectedStream = logStreamName;
+  for (const streamName of fallbackStreams) {
+    try {
+      response = await logsClient.send(
+        new GetLogEventsCommand({
+          logGroupName,
+          logStreamName: streamName,
+          startFromHead: false,
+          limit,
+          nextToken,
+        }),
+      );
+      selectedStream = streamName;
+      break;
+    } catch (error) {
+      if (error instanceof ResourceNotFoundException) {
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  if (!response) {
+    return {
+      source,
       logGroupName,
       logStreamName,
-      startFromHead: false,
-      limit,
-      nextToken,
-    }),
-  );
+      nextToken: null,
+      events: [],
+    };
+  }
+
   return {
     source,
     logGroupName,
-    logStreamName,
+    logStreamName: response ? selectedStream : logStreamName,
     nextToken: response.nextForwardToken ?? null,
     events: (response.events ?? []).map((event) => ({
       timestamp: event.timestamp,
@@ -502,6 +979,131 @@ async function readLogEvents(
       ingestionTime: event.ingestionTime,
     })),
   };
+}
+
+function isTerminalOrStoppedState(value: string | undefined): boolean {
+  if (!value) return false;
+  return ["terminated", "stopped", "shutting-down"].includes(value);
+}
+
+async function waitForCommandCompletion(
+  instanceId: string,
+  commandId: string,
+): Promise<"Success" | "Failed" | "TimedOut" | "Cancelled" | "Unknown"> {
+  const terminalStates = new Set([
+    "Success",
+    "Failed",
+    "Cancelled",
+    "TimedOut",
+    "Undeliverable",
+    "Terminated",
+  ]);
+  const timeout = Date.now() + 120_000;
+
+  while (Date.now() < timeout) {
+    try {
+      const invocation = await ssmClient.send(
+        new GetCommandInvocationCommand({
+          CommandId: commandId,
+          InstanceId: instanceId,
+        }),
+      );
+      const status = invocation.Status ?? "Unknown";
+      if (terminalStates.has(status)) {
+        const code = invocation.ResponseCode;
+        if (status === "Success" && code === 0) {
+          return "Success";
+        }
+        if (code === 0 && status === "Success") {
+          return "Success";
+        }
+        if (status === "Cancelled") return "Cancelled";
+        if (status === "TimedOut") return "TimedOut";
+        return "Failed";
+      }
+    } catch {
+      // wait for command invocation record to be available
+    }
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+
+  return "TimedOut";
+}
+
+async function sendFinalBackupCommand(instanceId: string): Promise<boolean> {
+  const commandName = config.ssm.backupDocumentName ?? "7d2d-backup";
+  let commandId: string | undefined;
+
+  try {
+    const backupResult = await ssmClient.send(
+      new SendCommandCommand({
+        InstanceIds: [instanceId],
+        DocumentName: commandName,
+        Comment: "7d2d-console:final-backup",
+      }),
+    );
+    commandId = backupResult.Command?.CommandId;
+  } catch {
+    // Fallback to direct shell command for legacy deployments
+    const fallback = await ssmClient.send(
+      new SendCommandCommand({
+        InstanceIds: [instanceId],
+        DocumentName: "AWS-RunShellScript",
+        Comment: "7d2d-console:final-backup-fallback",
+        Parameters: {
+          commands: [
+            'if ls /opt/*-tools/upload-state.sh >/dev/null 2>&1; then',
+            '  for script in /opt/*-tools/upload-state.sh; do',
+            '    bash "${script}" || true',
+            '  done',
+            'else',
+            '  echo "No upload-state scripts found"',
+            'fi',
+          ],
+        },
+      }),
+    );
+    commandId = fallback.Command?.CommandId;
+  }
+
+  if (!commandId) {
+    throw new Error("Failed to dispatch backup command");
+  }
+
+  const finalStatus = await waitForCommandCompletion(instanceId, commandId);
+  return finalStatus === "Success";
+}
+
+async function updateInstanceRecord(
+  instanceId: string,
+  patch: Partial<InstanceItem>,
+): Promise<void> {
+  const current = await instanceRepository.get(instanceId);
+  if (!current) return;
+  await instanceRepository.put({
+    ...current,
+    ...patch,
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+async function clearWorldLockForInstance(instance: InstanceItem): Promise<void> {
+  if (!instance.selectedWorldId || !instance.gameId) {
+    return;
+  }
+  const world = await worldPresetsRepository.get(
+    worldPk(instance.gameId, instance.selectedWorldId),
+  );
+  if (!world || world.currentInstanceId !== instance.instanceId) {
+    return;
+  }
+  await worldPresetsRepository.put({
+    ...world,
+    currentInstanceId: undefined,
+    currentInstanceGameId: undefined,
+    lockedAt: undefined,
+    updatedAt: new Date().toISOString(),
+  });
 }
 
 async function executeInstanceAction(
@@ -536,14 +1138,41 @@ async function executeInstanceAction(
   }
 
   try {
+    const targetInstance = await instanceRepository.get(instanceId);
+    const observedState = targetInstance?.ec2State ?? (await refreshEc2State(instanceId));
+
     if (action === "start") {
+      if (!instanceCanBeStarted(observedState)) {
+        throw new Error(
+          `Cannot start instance ${instanceId} from EC2 state: ${observedState ?? "unknown"}`,
+        );
+      }
       await ec2Client.send(new StartInstancesCommand({ InstanceIds: [instanceId] }));
-    } else if (action === "stop") {
-      await ec2Client.send(new StopInstancesCommand({ InstanceIds: [instanceId] }));
     } else if (action === "restart" || action === "reboot") {
       await ec2Client.send(new RebootInstancesCommand({ InstanceIds: [instanceId] }));
-    } else if (action === "terminate") {
-      await ec2Client.send(new TerminateInstancesCommand({ InstanceIds: [instanceId] }));
+    } else if (action === "stop" || action === "terminate") {
+      await updateInstanceRecord(instanceId, {
+        status: "backing-up",
+        backupState: "requested",
+      });
+      const backupSucceeded = await sendFinalBackupCommand(instanceId);
+      if (!backupSucceeded) {
+        throw new Error("Final backup command failed");
+      }
+
+      await updateInstanceRecord(instanceId, {
+        status: "terminating",
+        backupState: "idle",
+        lastBackupAt: new Date().toISOString(),
+      });
+
+      const ec2State = targetInstance?.ec2State ?? (await refreshEc2State(instanceId));
+      if (!isTerminalOrStoppedState(ec2State)) {
+        await ec2Client.send(
+          new TerminateInstancesCommand({ InstanceIds: [instanceId] }),
+        );
+      }
+      await clearWorldLockForInstance(targetInstance ?? { instanceId, gameId: "" } as InstanceItem);
     }
     operation = await saveOperation(operation, { status: "succeeded" });
   } catch (error) {
@@ -551,14 +1180,46 @@ async function executeInstanceAction(
       status: "failed",
       error: (error as Error).message,
     });
+    if (action === "stop" || action === "terminate") {
+      await updateInstanceRecord(instanceId, {
+        status: "backing-up",
+        backupState: "failed",
+      });
+    }
   }
 
   const instance = await instanceRepository.get(instanceId);
   if (instance) {
+    const isStopOrTerminateAction = action === "stop" || action === "terminate";
+    const failedStop = isStopOrTerminateAction && operation.status !== "succeeded";
     await instanceRepository.put({
       ...instance,
-      status: operation.status,
+      status: operation.status === "succeeded"
+        ? isStopOrTerminateAction
+          ? "terminated"
+          : action === "start"
+            ? "running"
+            : action
+        : failedStop
+          ? instance.status
+          : operation.status === "running"
+            ? action
+            : instance.status,
       updatedAt: new Date().toISOString(),
+      ec2State:
+        isStopOrTerminateAction
+          ? operation.status === "succeeded"
+            ? "stopped"
+            : instance.ec2State
+          : instance.ec2State,
+      backupState:
+        isStopOrTerminateAction
+          ? failedStop
+            ? "failed"
+            : "idle"
+          : operation.status === "failed" && isStopOrTerminateAction
+            ? "failed"
+            : instance.backupState,
     });
   }
 
@@ -639,6 +1300,61 @@ export function createRouter(): Router {
         name,
         description: body.description,
         config: body.config,
+        instanceType:
+          typeof body.instanceType === "string"
+            ? body.instanceType.trim()
+            : undefined,
+        defaultInstanceType:
+          typeof body.defaultInstanceType === "string"
+            ? body.defaultInstanceType.trim()
+            : undefined,
+        amiId: typeof body.amiId === "string" ? body.amiId.trim() : undefined,
+        subnetIds:
+          typeof body.subnetIds === "string"
+            ? normalizeCsvList(body.subnetIds)
+            : body.subnetIds,
+        securityGroupIds:
+          typeof body.securityGroupIds === "string"
+            ? normalizeCsvList(body.securityGroupIds)
+            : body.securityGroupIds,
+        keyName: typeof body.keyName === "string" ? body.keyName.trim() : undefined,
+        iamInstanceProfile:
+          typeof body.iamInstanceProfile === "string"
+            ? body.iamInstanceProfile.trim()
+            : undefined,
+        worldBucket:
+          typeof body.worldBucket === "string"
+            ? body.worldBucket.trim()
+            : undefined,
+        s3Prefix:
+          typeof body.s3Prefix === "string" ? body.s3Prefix.trim() : undefined,
+        worldBucketRegion:
+          typeof body.worldBucketRegion === "string"
+            ? body.worldBucketRegion.trim()
+            : undefined,
+        gameInstallCmd:
+          typeof body.gameInstallCmd === "string"
+            ? body.gameInstallCmd.trim()
+            : undefined,
+        gameStartCmd:
+          typeof body.gameStartCmd === "string"
+            ? body.gameStartCmd.trim()
+            : undefined,
+        udpPorts:
+          typeof body.udpPorts === "string"
+            ? normalizeCsvList(body.udpPorts)
+            : normalizeTextList(body.udpPorts),
+        tcpPorts:
+          typeof body.tcpPorts === "string"
+            ? normalizeCsvList(body.tcpPorts)
+            : normalizeTextList(body.tcpPorts),
+        ingressCidr:
+          typeof body.ingressCidr === "string"
+            ? body.ingressCidr.trim()
+            : undefined,
+        backupIntervalMinutes: parseIntConfig(body.backupIntervalMinutes, 5),
+        stopTimeoutSeconds: parseIntConfig(body.stopTimeoutSeconds, 30),
+        profileEnv: isObject(body.profileEnv) ? body.profileEnv : undefined,
         worldId: body.worldId,
         createdAt: now,
         updatedAt: now,
@@ -808,17 +1524,6 @@ export function createRouter(): Router {
           const created = await createInstancesForSpec(authReq, spec);
           allIds.push(...created);
           operation = await saveOperation(operation, { instanceIds: [...operation.instanceIds, ...created] });
-        }
-
-        const bootstrapSpec = specs.find((spec) => spec.bootstrap || spec.bootstrapAction);
-        if (bootstrapSpec && allIds.length > 0) {
-          await launchSsmCommand(
-            authReq,
-            allIds,
-            bootstrapSpec.bootstrapAction ?? "bootstrap",
-            bootstrapSpec.bootstrapDocumentName ?? config.ssm.bootstrapDocumentName,
-            idempotencyKey,
-          );
         }
 
         operation = await saveOperation(operation, {

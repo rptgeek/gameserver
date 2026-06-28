@@ -1,0 +1,396 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+export AWS_DEFAULT_REGION={{WORLD_BUCKET_REGION}}
+
+WORLD_BUCKET={{WORLD_BUCKET}}
+GAME_STATE_PREFIX={{GAME_STATE_PREFIX}}
+WORLD_PREFIX={{WORLD_PREFIX}}
+STATE_DIR_PATH={{STATE_DIR_PATH}}
+STATE_LINK={{STATE_LINK}}
+GAME_NAME={{GAME_NAME}}
+SERVICE_USER={{SERVICE_USER}}
+GAME_SERVICE={{GAME_SERVICE}}
+GAME_HOME={{GAME_HOME}}
+GAMECONFIG_S3_KEY={{GAMECONFIG_S3_KEY}}
+GAMECONFIG_LOCAL_PATH={{GAMECONFIG_LOCAL_PATH}}
+BACKUP_INTERVAL_MINUTES={{BACKUP_INTERVAL_MINUTES}}
+BACKUP_BOOT_OFFSET_MINUTES={{BACKUP_BOOT_OFFSET_MINUTES}}
+STOP_TIMEOUT_SECONDS={{STOP_TIMEOUT_SECONDS}}
+GAME_INSTALL_CMD_B64={{GAME_INSTALL_CMD_B64}}
+GAME_START_CMD_B64={{GAME_START_CMD_B64}}
+STEAM_BETA_BRANCH={{STEAM_BETA_BRANCH}}
+STEAM_BETA_PASSWORD={{STEAM_BETA_PASSWORD}}
+GAME_UDP_PORTS={{GAME_UDP_PORTS}}
+GAME_TCP_PORTS={{GAME_TCP_PORTS}}
+GAME_INGRESS_CIDR={{GAME_INGRESS_CIDR}}
+ENFORCE_BOOTSTRAP_LOG_PREFIX={{ENFORCE_BOOTSTRAP_LOG_PREFIX}}
+ENFORCE_SERVER_LOG_PREFIX={{ENFORCE_SERVER_LOG_PREFIX}}
+EC2_INSTANCE_ID="${EC2_INSTANCE_ID:-$(curl -fsS http://169.254.169.254/latest/meta-data/instance-id || true)}"
+
+GAME_NAME="${GAME_NAME#\"}"
+GAME_NAME="${GAME_NAME%\"}"
+STATE_DIR_PATH="${STATE_DIR_PATH#\"}"
+STATE_DIR_PATH="${STATE_DIR_PATH%\"}"
+GAME_HOME="${GAME_HOME#\"}"
+GAME_HOME="${GAME_HOME%\"}"
+STATE_LINK="${STATE_LINK#\"}"
+STATE_LINK="${STATE_LINK%\"}"
+GAME_INSTALL_CMD_B64="${GAME_INSTALL_CMD_B64#\"}"
+GAME_INSTALL_CMD_B64="${GAME_INSTALL_CMD_B64%\"}"
+GAME_START_CMD_B64="${GAME_START_CMD_B64#\"}"
+GAME_START_CMD_B64="${GAME_START_CMD_B64%\"}"
+STEAM_BETA_BRANCH="${STEAM_BETA_BRANCH#\"}"
+STEAM_BETA_BRANCH="${STEAM_BETA_BRANCH%\"}"
+STEAM_BETA_PASSWORD="${STEAM_BETA_PASSWORD#\"}"
+STEAM_BETA_PASSWORD="${STEAM_BETA_PASSWORD%\"}"
+GAMECONFIG_S3_KEY="${GAMECONFIG_S3_KEY#\"}"
+GAMECONFIG_S3_KEY="${GAMECONFIG_S3_KEY%\"}"
+GAMECONFIG_LOCAL_PATH="${GAMECONFIG_LOCAL_PATH#\"}"
+GAMECONFIG_LOCAL_PATH="${GAMECONFIG_LOCAL_PATH%\"}"
+WORLD_PREFIX="${WORLD_PREFIX#\"}"
+WORLD_PREFIX="${WORLD_PREFIX%\"}"
+
+decode() {
+  printf '%s' "${1}" | base64 -d
+}
+
+mkdir -p "/var/log/${GAME_NAME}" "/tmp"
+mkdir -p "/opt/${GAME_SERVICE}-tools" "${STATE_DIR_PATH}"
+mkdir -p "/etc/systemd/system" "/etc/awslogs" "/var/lib/awslogs"
+touch "/var/log/${GAME_NAME}/bootstrap.log" "/var/log/${GAME_NAME}/server.log"
+if [[ -n "${EC2_INSTANCE_ID}" ]]; then
+  LOG_STREAM_PREFIX="${EC2_INSTANCE_ID}"
+else
+  LOG_STREAM_PREFIX="$(hostname)-manual"
+fi
+exec >>"/var/log/${GAME_NAME}/bootstrap.log" 2>&1
+
+if command -v yum >/dev/null 2>&1; then
+  yum -y update
+  yum -y install ca-certificates tar gzip curl cronie || true
+  yum -y install awscli || true
+elif command -v apt-get >/dev/null 2>&1; then
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update
+  apt-get install -y ca-certificates tar gzip curl cron
+  apt-get install -y awscli || true
+fi
+
+if [[ "${SERVICE_USER}" == "auto" ]]; then
+  if id -u ec2-user >/dev/null 2>&1; then
+    SERVICE_USER="ec2-user"
+  elif id -u ubuntu >/dev/null 2>&1; then
+    SERVICE_USER="ubuntu"
+  else
+    SERVICE_USER="root"
+  fi
+fi
+
+if ! id -u "${SERVICE_USER}" >/dev/null 2>&1; then
+  SERVICE_USER="root"
+fi
+
+if [[ -z "${STATE_LINK}" ]]; then
+  SERVICE_USER_HOME="$(getent passwd "${SERVICE_USER}" | cut -d: -f6 || true)"
+  if [[ -z "${SERVICE_USER_HOME}" ]]; then
+    SERVICE_USER_HOME="/home/${SERVICE_USER}"
+  fi
+  STATE_LINK="${SERVICE_USER_HOME}/.local/share/7DaysToDie"
+else
+  STATE_LINK="${STATE_LINK%/}"
+fi
+
+mkdir -p "${STATE_LINK%/*}"
+mkdir -p "${STATE_LINK%/*}/.local/share"
+mkdir -p "${GAME_HOME}"
+mkdir -p "/etc/systemd/system"
+ln -sfn "${STATE_DIR_PATH}" "${STATE_LINK}"
+mkdir -p "/opt/${GAME_SERVICE}-tools"
+
+if id -u "${SERVICE_USER}" >/dev/null 2>&1; then
+  chown -R "${SERVICE_USER}:${SERVICE_USER}" "${STATE_DIR_PATH}" "${STATE_LINK%/*}" || true
+  chmod -R u+rwX "${STATE_DIR_PATH}" || true
+fi
+
+restore_state() {
+  aws s3 sync "s3://${WORLD_BUCKET}/${WORLD_PREFIX}/state/" "${STATE_DIR_PATH}/" || true
+  if [[ -d "${STATE_DIR_PATH}" ]] && [[ -n "${SERVICE_USER}" ]] && id -u "${SERVICE_USER}" >/dev/null 2>&1; then
+    chown -R "${SERVICE_USER}:${SERVICE_USER}" "${STATE_DIR_PATH}" || true
+    chmod -R u+rwX "${STATE_DIR_PATH}" || true
+  fi
+}
+
+configure_cloudwatch_agent() {
+  local bootstrap_group="${ENFORCE_BOOTSTRAP_LOG_PREFIX}"
+  local server_group="${ENFORCE_SERVER_LOG_PREFIX}"
+  local stream="${LOG_STREAM_PREFIX}"
+
+  if [[ -z "${bootstrap_group}" || -z "${server_group}" ]]; then
+    return 0
+  fi
+
+  if command -v yum >/dev/null 2>&1; then
+    yum -y install awslogs || true
+  elif command -v apt-get >/dev/null 2>&1; then
+    apt-get install -y awslogs || true
+  fi
+
+  if ! command -v awslogs >/dev/null 2>&1; then
+    return 0
+  fi
+
+  mkdir -p /etc/awslogs
+  cat > /etc/awslogs/awscli.conf <<'EOF'
+[plugins]
+cwlogs = cwlogs
+[default]
+region = {{WORLD_BUCKET_REGION}}
+EOF
+
+  cat > /etc/awslogs/awslogs.conf <<EOF
+[general]
+state_file = /var/lib/awslogs/agent-state
+
+[bootstrap-log]
+datetime_format = %b %d %H:%M:%S
+file = /var/log/${GAME_NAME}/bootstrap.log
+buffer_duration = 5000
+log_group_name = ${bootstrap_group}
+log_stream_name = ${stream}-bootstrap
+
+[server-log]
+datetime_format = %b %d %H:%M:%S
+file = /var/log/${GAME_NAME}/server.log
+buffer_duration = 5000
+log_group_name = ${server_group}
+log_stream_name = ${stream}-server
+EOF
+  mkdir -p /var/lib/awslogs
+  service awslogs stop >/dev/null 2>&1 || true
+  service awslogs start >/dev/null 2>&1 || true
+}
+
+upload_state() {
+  aws s3 sync "${STATE_DIR_PATH}/" "s3://${WORLD_BUCKET}/${WORLD_PREFIX}/state/" --delete || true
+}
+
+install_game() {
+  mkdir -p /opt/steamcmd "${GAME_HOME%/*}"
+  if [[ ! -x /opt/steamcmd/steamcmd.sh ]]; then
+    curl -fsSL https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz -o /tmp/steamcmd_linux.tar.gz
+    tar -xzf /tmp/steamcmd_linux.tar.gz -C /opt/steamcmd
+    chmod +x /opt/steamcmd/steamcmd.sh
+  fi
+
+  install_cmd="$(decode "${GAME_INSTALL_CMD_B64}")"
+  install_branches=( )
+  if [[ -n "${STEAM_BETA_BRANCH}" ]]; then
+    install_branches+=("${STEAM_BETA_BRANCH}")
+  fi
+  install_branches+=("")
+  if [[ "${STEAM_BETA_BRANCH}" == "latest_experimental" ]]; then
+    install_branches+=("experimental")
+  fi
+
+  for branch in "${install_branches[@]}"; do
+    if [[ -n "${branch}" ]]; then
+      STEAM_BETA_BRANCH="${branch}"
+    else
+      STEAM_BETA_BRANCH=""
+    fi
+    if STEAM_BETA_BRANCH="${STEAM_BETA_BRANCH}" STEAM_BETA_PASSWORD="${STEAM_BETA_PASSWORD}" bash -lc "${install_cmd}"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+cat > "/opt/${GAME_SERVICE}-tools/restore-state.sh" <<'EOS'
+#!/usr/bin/env bash
+set -euo pipefail
+WORLD_BUCKET='{{WORLD_BUCKET}}'
+WORLD_PREFIX='{{WORLD_PREFIX}}'
+STATE_DIR_PATH='{{STATE_DIR_PATH}}'
+[[ -n "${WORLD_BUCKET}" ]] && [[ -n "${WORLD_PREFIX}" ]] && aws s3 sync "s3://${WORLD_BUCKET}/${WORLD_PREFIX}/state/" "${STATE_DIR_PATH}/" || true
+EOS
+
+cat > "/opt/${GAME_SERVICE}-tools/upload-state.sh" <<'EOS'
+#!/usr/bin/env bash
+set -euo pipefail
+WORLD_BUCKET='{{WORLD_BUCKET}}'
+WORLD_PREFIX='{{WORLD_PREFIX}}'
+STATE_DIR_PATH='{{STATE_DIR_PATH}}'
+GAMECONFIG_LOCAL_PATH='{{GAMECONFIG_LOCAL_PATH}}'
+if [[ -n "${WORLD_BUCKET}" ]] && [[ -n "${WORLD_PREFIX}" ]]; then
+  aws s3 sync "${STATE_DIR_PATH}/" "s3://${WORLD_BUCKET}/${WORLD_PREFIX}/state/" --delete || true
+fi
+if [[ -n "${GAMECONFIG_LOCAL_PATH}" ]] && [[ -f "${GAMECONFIG_LOCAL_PATH}" ]]; then
+  aws s3 cp "${GAMECONFIG_LOCAL_PATH}" "s3://${WORLD_BUCKET}/${GAMECONFIG_S3_KEY}" || true
+fi
+EOS
+
+cat > "/opt/${GAME_SERVICE}-tools/stop-server.command" <<'EOS'
+#!/usr/bin/env bash
+set -euo pipefail
+STOP_TIMEOUT_SECONDS='{{STOP_TIMEOUT_SECONDS}}'
+game_pids="$(pgrep -f "7DaysToDieServer.x86_64" || true)"
+if [[ -n "${game_pids}" ]]; then
+  while IFS= read -r game_pid; do
+    kill -s TERM "${game_pid}" 2>/dev/null || true
+  done <<< "${game_pids}"
+  sleep "${STOP_TIMEOUT_SECONDS}"
+fi
+remaining="$(pgrep -f "7DaysToDieServer.x86_64" || true)"
+if [[ -n "${remaining}" ]]; then
+  while IFS= read -r game_pid; do
+    kill -s KILL "${game_pid}" 2>/dev/null || true
+  done <<< "${remaining}"
+fi
+"/opt/{{GAME_SERVICE}}-tools/upload-state.sh" || true
+EOS
+
+cat > "/opt/${GAME_SERVICE}-tools/start-server.command" <<'EOS'
+#!/usr/bin/env bash
+set -euo pipefail
+GAME_NAME='{{GAME_NAME}}'
+GAME_HOME='{{GAME_HOME}}'
+GAMECONFIG_LOCAL_PATH='{{GAMECONFIG_LOCAL_PATH}}'
+GAMECONFIG_S3_KEY='{{GAMECONFIG_S3_KEY}}'
+WORLD_BUCKET='{{WORLD_BUCKET}}'
+WORLD_PREFIX='{{WORLD_PREFIX}}'
+GAME_START_CMD_B64='{{GAME_START_CMD_B64}}'
+mkdir -p "$(dirname "${GAMECONFIG_LOCAL_PATH}")"
+if [[ -n "${WORLD_BUCKET}" && -n "${GAMECONFIG_S3_KEY}" ]]; then
+  aws s3 cp "s3://${WORLD_BUCKET}/${GAMECONFIG_S3_KEY}" "${GAMECONFIG_LOCAL_PATH}" || true
+fi
+if [[ ! -f "${GAMECONFIG_LOCAL_PATH}" ]]; then
+  cat <<XML > "${GAMECONFIG_LOCAL_PATH}"
+<ServerSettings>
+  <property name="BloodMoonFrequency" value="7" />
+  <property name="BloodMoonRange" value="2" />
+  <property name="DropOnDeath" value="2" />
+  <property name="PlayerKillingMode" value="2" />
+  <property name="AirDropMarker" value="true" />
+</ServerSettings>
+XML
+fi
+mkdir -p "${GAME_HOME}"
+mkdir -p "${STATE_LINK%/*}" || true
+mkdir -p "/home/$(whoami)/.local/share/7DaysToDie" || true
+eval "$(printf '%s' "${GAME_START_CMD_B64}" | base64 -d)"
+EOS
+
+cat > "/opt/${GAME_SERVICE}-tools/spot-watchdog.sh" <<'EOS'
+#!/usr/bin/env bash
+set -euo pipefail
+NOTICE_URL="http://169.254.169.254/latest/meta-data/spot/instance-action"
+while true; do
+  if notice="$(curl -fsS --max-time 1 "${NOTICE_URL}" || true)"; then
+    if [[ "${notice}" == *\"action\"* ]]; then
+      "/opt/{{GAME_SERVICE}}-tools/upload-state.sh" || true
+      /usr/bin/systemctl stop "{{GAME_SERVICE}}-server.service" || true
+      /usr/sbin/shutdown -h now "Spot termination notice"
+      exit 0
+    fi
+  fi
+  sleep 15
+done
+EOS
+
+chmod +x "/opt/${GAME_SERVICE}-tools/restore-state.sh" \
+  "/opt/${GAME_SERVICE}-tools/upload-state.sh" \
+  "/opt/${GAME_SERVICE}-tools/spot-watchdog.sh" \
+  "/opt/${GAME_SERVICE}-tools/stop-server.command" \
+  "/opt/${GAME_SERVICE}-tools/start-server.command"
+
+cat > "/etc/systemd/system/${GAME_SERVICE}-server.service" <<SERVER_SERVICE
+[Unit]
+Description=${GAME_NAME} dedicated server
+After=network.target
+
+[Service]
+Type=simple
+User=${SERVICE_USER}
+WorkingDirectory=${GAME_HOME}
+Environment=STATE_DIR_PATH=${STATE_DIR_PATH}
+Environment=WORLD_BUCKET={{WORLD_BUCKET}}
+Environment=WORLD_PREFIX=${WORLD_PREFIX}
+Environment=GAME_HOME=${GAME_HOME}
+Environment=GAMECONFIG_S3_KEY=${GAMECONFIG_S3_KEY}
+Environment=GAMECONFIG_LOCAL_PATH=${GAMECONFIG_LOCAL_PATH}
+Environment=GAME_SERVICE=${GAME_SERVICE}
+Environment=STATE_LINK=${STATE_LINK}
+Environment=BACKUP_INTERVAL_MINUTES={{BACKUP_INTERVAL_MINUTES}}
+Environment=BACKUP_BOOT_OFFSET_MINUTES={{BACKUP_BOOT_OFFSET_MINUTES}}
+Environment=STOP_TIMEOUT_SECONDS={{STOP_TIMEOUT_SECONDS}}
+ExecStart=/opt/${GAME_SERVICE}-tools/start-server.command
+ExecStop=/opt/${GAME_SERVICE}-tools/stop-server.command
+ExecStopPost=/opt/${GAME_SERVICE}-tools/upload-state.sh
+Restart=always
+RestartSec=5
+TimeoutStopSec=120
+KillMode=control-group
+StandardOutput=append:/var/log/${GAME_NAME}/server.log
+StandardError=append:/var/log/${GAME_NAME}/server.error.log
+
+[Install]
+WantedBy=multi-user.target
+SERVER_SERVICE
+
+cat > "/etc/systemd/system/${GAME_SERVICE}-watchdog.service" <<WATCHDOG_SERVICE
+[Unit]
+Description=Spot interruption watcher for ${GAME_NAME}
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/opt/${GAME_SERVICE}-tools/spot-watchdog.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+WATCHDOG_SERVICE
+
+cat > "/etc/systemd/system/${GAME_SERVICE}-backup.service" <<BACKUP_SERVICE
+[Unit]
+Description=${GAME_NAME} periodic backup
+
+[Service]
+Type=oneshot
+ExecStart=/opt/${GAME_SERVICE}-tools/upload-state.sh
+BACKUP_SERVICE
+
+cat > "/etc/systemd/system/${GAME_SERVICE}-backup.timer" <<BACKUP_TIMER
+[Unit]
+Description=${GAME_NAME} state backup timer
+
+[Timer]
+OnBootSec={{BACKUP_BOOT_OFFSET_MINUTES}}min
+OnUnitActiveSec={{BACKUP_INTERVAL_MINUTES}}min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+BACKUP_TIMER
+
+systemctl daemon-reload
+restore_state
+install_game
+
+if [[ -n "${GAMECONFIG_S3_KEY}" ]]; then
+  GAMECONFIG_LOCAL_PATH="${GAMECONFIG_LOCAL_PATH}" WORLD_BUCKET="{{WORLD_BUCKET}}" WORLD_PREFIX="{{WORLD_PREFIX}}" /opt/${GAME_SERVICE}-tools/start-server.command || true
+fi
+
+systemctl enable "${GAME_SERVICE}-server.service" "${GAME_SERVICE}-watchdog.service" "${GAME_SERVICE}-backup.timer"
+systemctl start "${GAME_SERVICE}-server.service"
+systemctl start "${GAME_SERVICE}-backup.timer"
+configure_cloudwatch_agent
+
+cat <<INFO
+{{GAME_NAME}} bootstrap complete.
+Game files: ${GAME_HOME}
+State path: ${STATE_DIR_PATH}
+World path: ${WORLD_PREFIX}
+INFO

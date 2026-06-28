@@ -1,6 +1,7 @@
 # Control Plane Architecture
 
-This document defines the v1 control plane contract for the game spot orchestrator (`start-game-spot.sh`, `stop-game-spot.sh`, `status-game-spot.sh`) and the migration path toward a managed API layer.
+This document defines the API-first control plane for the game spot orchestrator.  
+Legacy scripts (`start-game-spot.sh`, `stop-game-spot.sh`, `status-game-spot.sh`) are retained for manual workflows only.
 
 ## Scope
 
@@ -16,7 +17,7 @@ This document defines the v1 control plane contract for the game spot orchestrat
 - `aws-ec2` manages Spot instance lifecycle.
 - `aws-ssm` executes in-VM backup hooks.
 - `instance runtime` executes bootstrap script and systemd services.
-- `state store` uses `scripts/.game-spot/*.state` plus S3 world/state prefixes.
+- `state store` uses DynamoDB records plus S3 world/state prefixes.
 
 ## Multi-Game Profile Model
 
