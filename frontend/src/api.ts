@@ -7,6 +7,7 @@ import type {
   LogType,
   OperationResult,
   ServerInstance,
+  WorldServerConfig,
   WorldPreset,
 } from './types';
 
@@ -252,6 +253,22 @@ export async function createWorld(gameId: string, payload: {
   return Array.isArray(result)
     ? result[0]
     : ('world' in result ? (result.world as WorldPreset) : (result as WorldPreset));
+}
+
+export async function getWorldServerConfig(gameId: string, worldId: string): Promise<WorldServerConfig> {
+  return request<WorldServerConfig>(
+    `/v1/games/${encodeURIComponent(gameId)}/worlds/${encodeURIComponent(worldId)}/server-config`,
+  );
+}
+
+export async function saveWorldServerConfig(gameId: string, worldId: string, configXml: string): Promise<WorldServerConfig> {
+  return request<WorldServerConfig>(
+    `/v1/games/${encodeURIComponent(gameId)}/worlds/${encodeURIComponent(worldId)}/server-config`,
+    {
+      method: 'PUT',
+      body: { configXml },
+    },
+  );
 }
 
 export async function listInstances(gameId?: string): Promise<ServerInstance[]> {

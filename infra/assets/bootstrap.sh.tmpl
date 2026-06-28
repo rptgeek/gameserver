@@ -28,28 +28,34 @@ ENFORCE_BOOTSTRAP_LOG_PREFIX={{ENFORCE_BOOTSTRAP_LOG_PREFIX}}
 ENFORCE_SERVER_LOG_PREFIX={{ENFORCE_SERVER_LOG_PREFIX}}
 EC2_INSTANCE_ID="${EC2_INSTANCE_ID:-$(curl -fsS http://169.254.169.254/latest/meta-data/instance-id || true)}"
 
-GAME_NAME="${GAME_NAME#\"}"
-GAME_NAME="${GAME_NAME%\"}"
-STATE_DIR_PATH="${STATE_DIR_PATH#\"}"
-STATE_DIR_PATH="${STATE_DIR_PATH%\"}"
-GAME_HOME="${GAME_HOME#\"}"
-GAME_HOME="${GAME_HOME%\"}"
-STATE_LINK="${STATE_LINK#\"}"
-STATE_LINK="${STATE_LINK%\"}"
-GAME_INSTALL_CMD_B64="${GAME_INSTALL_CMD_B64#\"}"
-GAME_INSTALL_CMD_B64="${GAME_INSTALL_CMD_B64%\"}"
-GAME_START_CMD_B64="${GAME_START_CMD_B64#\"}"
-GAME_START_CMD_B64="${GAME_START_CMD_B64%\"}"
-STEAM_BETA_BRANCH="${STEAM_BETA_BRANCH#\"}"
-STEAM_BETA_BRANCH="${STEAM_BETA_BRANCH%\"}"
-STEAM_BETA_PASSWORD="${STEAM_BETA_PASSWORD#\"}"
-STEAM_BETA_PASSWORD="${STEAM_BETA_PASSWORD%\"}"
-GAMECONFIG_S3_KEY="${GAMECONFIG_S3_KEY#\"}"
-GAMECONFIG_S3_KEY="${GAMECONFIG_S3_KEY%\"}"
-GAMECONFIG_LOCAL_PATH="${GAMECONFIG_LOCAL_PATH#\"}"
-GAMECONFIG_LOCAL_PATH="${GAMECONFIG_LOCAL_PATH%\"}"
-WORLD_PREFIX="${WORLD_PREFIX#\"}"
-WORLD_PREFIX="${WORLD_PREFIX%\"}"
+strip_wrapping_quotes() {
+  local value="${1:-}"
+  value="${value#\"}"
+  value="${value%\"}"
+  value="${value#\'}"
+  value="${value%\'}"
+  printf '%s' "${value}"
+}
+
+AWS_DEFAULT_REGION="$(strip_wrapping_quotes "${AWS_DEFAULT_REGION}")"
+WORLD_BUCKET="$(strip_wrapping_quotes "${WORLD_BUCKET}")"
+GAME_STATE_PREFIX="$(strip_wrapping_quotes "${GAME_STATE_PREFIX}")"
+WORLD_PREFIX="$(strip_wrapping_quotes "${WORLD_PREFIX}")"
+STATE_DIR_PATH="$(strip_wrapping_quotes "${STATE_DIR_PATH}")"
+STATE_LINK="$(strip_wrapping_quotes "${STATE_LINK}")"
+GAME_NAME="$(strip_wrapping_quotes "${GAME_NAME}")"
+SERVICE_USER="$(strip_wrapping_quotes "${SERVICE_USER}")"
+GAME_SERVICE="$(strip_wrapping_quotes "${GAME_SERVICE}")"
+GAME_HOME="$(strip_wrapping_quotes "${GAME_HOME}")"
+GAMECONFIG_S3_KEY="$(strip_wrapping_quotes "${GAMECONFIG_S3_KEY}")"
+GAMECONFIG_LOCAL_PATH="$(strip_wrapping_quotes "${GAMECONFIG_LOCAL_PATH}")"
+GAME_INSTALL_CMD_B64="$(strip_wrapping_quotes "${GAME_INSTALL_CMD_B64}")"
+GAME_START_CMD_B64="$(strip_wrapping_quotes "${GAME_START_CMD_B64}")"
+STEAM_BETA_BRANCH="$(strip_wrapping_quotes "${STEAM_BETA_BRANCH}")"
+STEAM_BETA_PASSWORD="$(strip_wrapping_quotes "${STEAM_BETA_PASSWORD}")"
+GAME_INGRESS_CIDR="$(strip_wrapping_quotes "${GAME_INGRESS_CIDR}")"
+ENFORCE_BOOTSTRAP_LOG_PREFIX="$(strip_wrapping_quotes "${ENFORCE_BOOTSTRAP_LOG_PREFIX}")"
+ENFORCE_SERVER_LOG_PREFIX="$(strip_wrapping_quotes "${ENFORCE_SERVER_LOG_PREFIX}")"
 
 decode() {
   printf '%s' "${1}" | base64 -d
@@ -104,13 +110,22 @@ fi
 mkdir -p "${STATE_LINK%/*}"
 mkdir -p "${STATE_LINK%/*}/.local/share"
 mkdir -p "${GAME_HOME}"
+mkdir -p "/var/log/${GAME_NAME}"
+touch "/var/log/${GAME_NAME}/bootstrap.log" \
+  "/var/log/${GAME_NAME}/server.log" \
+  "/var/log/${GAME_NAME}/server.error.log"
 mkdir -p "/etc/systemd/system"
 ln -sfn "${STATE_DIR_PATH}" "${STATE_LINK}"
 mkdir -p "/opt/${GAME_SERVICE}-tools"
 
 if id -u "${SERVICE_USER}" >/dev/null 2>&1; then
-  chown -R "${SERVICE_USER}:${SERVICE_USER}" "${STATE_DIR_PATH}" "${STATE_LINK%/*}" || true
+  chown -R "${SERVICE_USER}:${SERVICE_USER}" \
+    "${STATE_DIR_PATH}" \
+    "${STATE_LINK%/*}" \
+    "${GAME_HOME}" \
+    "/var/log/${GAME_NAME}" || true
   chmod -R u+rwX "${STATE_DIR_PATH}" || true
+  chmod -R u+rwX "/var/log/${GAME_NAME}" || true
 fi
 
 restore_state() {
@@ -148,7 +163,7 @@ configure_cloudwatch_agent() {
   cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<EOF
 {
   "agent": {
-    "region": "{{WORLD_BUCKET_REGION}}"
+    "region": "${AWS_DEFAULT_REGION}"
   },
   "logs": {
     "logs_collected": {
@@ -301,6 +316,31 @@ GAMECONFIG_S3_KEY='{{GAMECONFIG_S3_KEY}}'
 WORLD_BUCKET='{{WORLD_BUCKET}}'
 WORLD_PREFIX='{{WORLD_PREFIX}}'
 GAME_START_CMD_B64='{{GAME_START_CMD_B64}}'
+
+ensure_steamclient() {
+  local steam_lib="/opt/steamcmd/linux64/steamclient.so"
+  if [[ ! -f "${steam_lib}" ]]; then
+    steam_lib="/opt/steamcmd/linux32/steamclient.so"
+  fi
+  if [[ ! -f "${steam_lib}" ]]; then
+    return 0
+  fi
+
+  local runtime_user="${USER:-$(whoami)}"
+  local user_home="${HOME:-}"
+  if [[ -z "${user_home}" || ! -d "${user_home}" ]]; then
+    user_home="$(getent passwd "${runtime_user}" | cut -d: -f6 || true)"
+  fi
+  if [[ -n "${user_home}" ]]; then
+    mkdir -p "${user_home}/.steam/sdk64"
+    ln -sf "${steam_lib}" "${user_home}/.steam/sdk64/steamclient.so"
+  fi
+}
+
+runtime_user="${USER:-$(whoami)}"
+export USER="${runtime_user}"
+export HOME="${HOME:-$(getent passwd "${runtime_user}" | cut -d: -f6 || true)}"
+
 mkdir -p "$(dirname "${GAMECONFIG_LOCAL_PATH}")"
 if [[ -n "${WORLD_BUCKET}" && -n "${GAMECONFIG_S3_KEY}" ]]; then
   aws s3 cp "s3://${WORLD_BUCKET}/${GAMECONFIG_S3_KEY}" "${GAMECONFIG_LOCAL_PATH}" || true
@@ -319,6 +359,7 @@ fi
 mkdir -p "${GAME_HOME}"
 mkdir -p "${STATE_LINK%/*}" || true
 mkdir -p "/home/$(whoami)/.local/share/7DaysToDie" || true
+ensure_steamclient
 eval "$(printf '%s' "${GAME_START_CMD_B64}" | base64 -d)"
 EOS
 
@@ -372,6 +413,7 @@ Restart=always
 RestartSec=5
 TimeoutStopSec=120
 KillMode=control-group
+LimitNOFILE=10240
 StandardOutput=append:/var/log/${GAME_NAME}/server.log
 StandardError=append:/var/log/${GAME_NAME}/server.error.log
 
@@ -424,6 +466,20 @@ install_game
 if [[ -n "${GAMECONFIG_S3_KEY}" ]]; then
   GAMECONFIG_LOCAL_PATH="${GAMECONFIG_LOCAL_PATH}" WORLD_BUCKET="{{WORLD_BUCKET}}" WORLD_PREFIX="{{WORLD_PREFIX}}" /opt/${GAME_SERVICE}-tools/start-server.command || true
 fi
+
+if id -u "${SERVICE_USER}" >/dev/null 2>&1; then
+  chown -R "${SERVICE_USER}:${SERVICE_USER}" \
+    "${GAME_HOME}" \
+    "${STATE_DIR_PATH}" \
+    "${STATE_LINK%/*}" \
+    "/var/log/${GAME_NAME}" || true
+  chmod -R u+rwX "${STATE_DIR_PATH}" "/var/log/${GAME_NAME}" || true
+fi
+
+cat > /etc/sysctl.d/99-${GAME_SERVICE}.conf <<SYSCTL
+vm.max_map_count=262144
+SYSCTL
+sysctl -p /etc/sysctl.d/99-${GAME_SERVICE}.conf || true
 
 systemctl enable "${GAME_SERVICE}-server.service" "${GAME_SERVICE}-watchdog.service" "${GAME_SERVICE}-backup.timer"
 systemctl start "${GAME_SERVICE}-server.service"

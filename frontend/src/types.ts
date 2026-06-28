@@ -36,6 +36,15 @@ export interface WorldPreset {
   [key: string]: unknown;
 }
 
+export interface WorldServerConfig {
+  bucket: string;
+  key: string;
+  sourceKey?: string;
+  worldPrefix?: string;
+  exists?: boolean;
+  configXml: string;
+}
+
 export interface ServerInstance {
   id: string;
   instanceId?: string;

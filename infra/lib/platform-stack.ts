@@ -243,6 +243,15 @@ export class PlatformInfraStack extends cdk.Stack {
       }),
     );
 
+    backendLambdaRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'WorldConfigS3Access',
+        effect: iam.Effect.ALLOW,
+        actions: ['s3:GetObject', 's3:PutObject'],
+        resources: ['arn:aws:s3:::*/*'],
+      }),
+    );
+
     const bootstrapDocument = new ssm.CfnDocument(this, '7d2dBootstrapDocument', {
       documentType: 'Command',
       name: bootstrapDocumentName,
@@ -326,6 +335,16 @@ export class PlatformInfraStack extends cdk.Stack {
       },
     });
 
+    new logs.LogRetention(this, 'GameBootstrapLogRetention', {
+      logGroupName: '/7d2d/bootstrap',
+      retention: logs.RetentionDays.THREE_DAYS,
+    });
+
+    new logs.LogRetention(this, 'GameServerLogRetention', {
+      logGroupName: '/7d2d/server',
+      retention: logs.RetentionDays.THREE_DAYS,
+    });
+
     backendLambdaRole.addToPolicy(
       new iam.PolicyStatement({
         sid: 'CloudWatchMetrics',
@@ -382,7 +401,7 @@ export class PlatformInfraStack extends cdk.Stack {
         },
       },
       role: backendLambdaRole,
-      logRetention: logs.RetentionDays.ONE_WEEK,
+      logRetention: logs.RetentionDays.THREE_DAYS,
     });
     const backendIntegration = new apigatewayIntegrations.HttpLambdaIntegration(
       `${prefix}-backend-integration`,

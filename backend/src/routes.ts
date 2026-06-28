@@ -2,7 +2,9 @@ import { randomUUID } from "crypto";
 import { NextFunction, Request, Response, Router } from "express";
 import { readFileSync } from "node:fs";
 import path from "node:path";
+import { gzipSync } from "node:zlib";
 import {
+  DescribeImagesCommand,
   DescribeInstancesCommand,
   DescribeSpotPriceHistoryCommand,
   DescribeSubnetsCommand,
@@ -17,6 +19,11 @@ import {
   SendCommandCommand,
 } from "@aws-sdk/client-ssm";
 import {
+  GetObjectCommand,
+  NoSuchKey,
+  PutObjectCommand,
+} from "@aws-sdk/client-s3";
+import {
   CreateLogStreamCommand,
   GetLogEventsCommand,
   ResourceNotFoundException,
@@ -24,7 +31,7 @@ import {
 import { createRemoteJWKSet, jwtVerify, JWTPayload } from "jose";
 
 import { config } from "./config";
-import { ddbClient, ec2Client, logsClient, ssmClient } from "./aws";
+import { ddbClient, ec2Client, logsClient, s3Client, ssmClient } from "./aws";
 import { BaseRepository } from "./models/repositories";
 import {
   ConfigHistoryItem,
@@ -264,6 +271,21 @@ async function resolveAmiId(profileAmiId: string | undefined): Promise<string> {
   return value;
 }
 
+async function resolveAmiRootDeviceName(imageId: string): Promise<string> {
+  try {
+    const result = await ec2Client.send(
+      new DescribeImagesCommand({ ImageIds: [imageId] }),
+    );
+    const rootDeviceName = result.Images?.[0]?.RootDeviceName;
+    if (rootDeviceName && rootDeviceName !== "None") {
+      return rootDeviceName;
+    }
+  } catch {
+    // Fall back to the common Nitro device name if the lookup fails.
+  }
+  return "/dev/xvda";
+}
+
 function parseSubnets(profileSubnetIds: string[] = [], specSubnetIds: string[] = [], fallback?: string): string[] {
   if (specSubnetIds.length > 0) return specSubnetIds;
   if (profileSubnetIds.length > 0) return profileSubnetIds;
@@ -470,6 +492,17 @@ function renderBootstrapTemplate(profile: GameProfileItem, worldPrefix: string, 
   return template;
 }
 
+function encodeUserData(script: string): string {
+  const compressed = gzipSync(Buffer.from(script, "utf8")).toString("base64");
+  const wrapper = [
+    "#!/usr/bin/env bash",
+    "set -euo pipefail",
+    `printf '%s' '${compressed}' | base64 -d | gzip -dc | bash`,
+    "",
+  ].join("\n");
+  return Buffer.from(wrapper, "utf8").toString("base64");
+}
+
 function bootstrapTemplate(): string {
   if (process.env.BOOTSTRAP_TEMPLATE) {
     return process.env.BOOTSTRAP_TEMPLATE;
@@ -507,6 +540,14 @@ function logStreamNameFor(instanceId: string, source: "bootstrap" | "server"): s
 
 function worldPrefixToken(world: string): string {
   return `${sanitizeToken(world)}${world ? "" : randomUUID().slice(0, 12)}`;
+}
+
+function canonicalWorldPrefix(basePrefix: string, gameId: string, worldId: string): string {
+  return `${basePrefix.replace(/\/+$/, "")}/${gameId}/${sanitizeToken(worldId)}`;
+}
+
+function worldConfigKey(worldPrefix: string): string {
+  return `${worldPrefix.replace(/\/+$/, "")}/config/serverconfig.xml`;
 }
 
 function profilePk(gameId: string, profileId: string): string {
@@ -575,6 +616,36 @@ function parseProfileListEntry(profile: GameProfileItem): GameProfileItem {
 
 function parseWorldListEntry(world: WorldPresetItem): WorldPresetItem {
   return world;
+}
+
+async function getS3ObjectText(bucket: string, key: string): Promise<string | undefined> {
+  try {
+    const response = await s3Client.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+    return response.Body?.transformToString ? await response.Body.transformToString() : undefined;
+  } catch (error) {
+    if (error instanceof NoSuchKey || (error as Error).name === "NoSuchKey") {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+async function resolveWorldConfigLocation(
+  gameId: string,
+  world: WorldPresetItem,
+): Promise<{ bucket: string; key: string; fallbackKeys: string[]; worldPrefix: string }> {
+  const profiles = (await gameProfilesRepository.scanByPrefix("pk", `game-profile#${gameId}#`))
+    .filter((profile) => hasProfileShape(profile) && isGameProfileForGame(profile, gameId));
+  const launchProfile = profiles.find(hasLaunchSettings) || profiles[0];
+  const basePrefix = launchProfile?.s3Prefix || "servers";
+  const worldPrefix = world.worldPrefix || canonicalWorldPrefix(basePrefix, gameId, world.worldId);
+  const bucket = launchProfile?.worldBucket || "7d2d-state-prod";
+  const key = worldConfigKey(worldPrefix);
+  const fallbackKeys = [
+    launchProfile?.gameConfigS3Key,
+    `${basePrefix.replace(/\/+$/, "")}/${gameId}/config/serverconfig.xml`,
+  ].filter((candidate): candidate is string => Boolean(candidate));
+  return { bucket, key, fallbackKeys, worldPrefix };
 }
 
 function withAsync<T = void>(
@@ -647,15 +718,72 @@ function expectedEc2State(action: OperationItem["action"]): string | undefined {
   return undefined;
 }
 
-async function refreshEc2State(instanceId: string): Promise<string | undefined> {
+type Ec2InstanceSnapshot = {
+  ec2State?: string;
+  publicIp?: string;
+  privateIp?: string;
+  startedAt?: string;
+};
+
+async function describeEc2InstanceSnapshot(instanceId: string): Promise<Ec2InstanceSnapshot | undefined> {
   try {
     const result = await ec2Client.send(
       new DescribeInstancesCommand({ InstanceIds: [instanceId] }),
     );
-    return result.Reservations?.[0]?.Instances?.[0]?.State?.Name;
+    const instance = result.Reservations?.[0]?.Instances?.[0];
+    if (!instance) return undefined;
+    return {
+      ec2State: instance.State?.Name,
+      publicIp: instance.PublicIpAddress,
+      privateIp: instance.PrivateIpAddress,
+      startedAt: instance.LaunchTime?.toISOString(),
+    };
   } catch {
     return undefined;
   }
+}
+
+async function refreshEc2State(instanceId: string): Promise<string | undefined> {
+  return (await describeEc2InstanceSnapshot(instanceId))?.ec2State;
+}
+
+function shouldRefreshInstanceFromEc2(instance: InstanceItem): boolean {
+  const status = (instance.status || "").toLowerCase();
+  const ec2State = (instance.ec2State || "").toLowerCase();
+  return !["terminated"].includes(status) && !["terminated"].includes(ec2State);
+}
+
+async function hydrateInstanceFromEc2(instance: InstanceItem): Promise<InstanceItem> {
+  if (!instance.instanceId || !shouldRefreshInstanceFromEc2(instance)) {
+    return instance;
+  }
+  const snapshot = await describeEc2InstanceSnapshot(instance.instanceId);
+  if (!snapshot) return instance;
+
+  const next: InstanceItem = {
+    ...instance,
+    ec2State: snapshot.ec2State ?? instance.ec2State,
+    publicIp: snapshot.publicIp,
+    privateIp: snapshot.privateIp,
+    startedAt: snapshot.startedAt ?? instance.startedAt,
+    status:
+      instance.status === "launching" && snapshot.ec2State === "running"
+        ? "running"
+        : instance.status,
+    updatedAt: new Date().toISOString(),
+  };
+
+  if (
+    next.ec2State !== instance.ec2State ||
+    next.publicIp !== instance.publicIp ||
+    next.privateIp !== instance.privateIp ||
+    next.startedAt !== instance.startedAt ||
+    next.status !== instance.status
+  ) {
+    await instanceRepository.put(next);
+  }
+
+  return next;
 }
 
 async function createOperation(
@@ -861,6 +989,7 @@ async function createInstancesForSpec(
     profile.defaultInstanceType ??
     config.ec2.defaultInstanceType;
   const imageId = await resolveAmiId(spec.amiId ?? profile.amiId);
+  const rootDeviceName = await resolveAmiRootDeviceName(imageId);
 
   const securityGroupIds =
     normalizeTextList(spec.securityGroupIds ?? profile.securityGroupIds ?? config.ec2.defaultSecurityGroupIds)
@@ -886,12 +1015,12 @@ async function createInstancesForSpec(
 
   const basePrefix = profile.s3Prefix ?? "servers";
   const basePrefixSafe = basePrefix.replace(/\/+$/, "");
-  const worldSuffix = selectedWorld?.worldPrefix
-    ? selectedWorld.worldPrefix
-    : selectedWorld?.worldId
-      ? selectedWorld.worldId
-      : spec.worldName || worldPrefixToken(spec.worldName ?? "");
-  const worldPrefix = `${basePrefixSafe}/${gameId}/${sanitizeToken(worldSuffix)}`;
+  const worldSuffix =
+    selectedWorld?.worldId ||
+    spec.selectedWorldId ||
+    spec.worldName ||
+    worldPrefixToken(spec.worldName ?? "");
+  const worldPrefix = canonicalWorldPrefix(basePrefixSafe, gameId, worldSuffix);
   const worldLabel = selectedWorld?.name || spec.worldName || worldSuffix;
 
   const bootstrapProfile = {
@@ -904,7 +1033,7 @@ async function createInstancesForSpec(
     gameInstallCmd: profile.gameInstallCmd || "",
     gameStartCmd: profile.gameStartCmd || "",
     gameStateDirPath: profile.gameStateDirPath || `/srv/${profile.gameName || gameId}-state`,
-    gameConfigS3Key: profile.gameConfigS3Key || `${worldPrefix}/config/serverconfig.xml`,
+    gameConfigS3Key: worldConfigKey(worldPrefix),
     gameConfigLocalPath: profile.gameConfigLocalPath || `/opt/${profile.gameName || gameId}/serverconfig.xml`,
     stateLink: profile.stateLink,
     steamBetaBranch: profile.steamBetaBranch || "",
@@ -923,21 +1052,19 @@ async function createInstancesForSpec(
     worldPrefix,
     gameId,
   );
-  const userData = Buffer.from(bootstrapScript, "utf8").toString("base64");
+  const userData = encodeUserData(bootstrapScript);
 
-  const blockDevices = profile.volumeSizeGiB
-    ? [
-      {
-        DeviceName: "/dev/xvda",
-        Ebs: {
-          VolumeSize: asPositiveInt(profile.volumeSizeGiB, 80),
-          VolumeType: "gp3",
-          Encrypted: true,
-          DeleteOnTermination: true,
-        },
+  const blockDevices = [
+    {
+      DeviceName: rootDeviceName,
+      Ebs: {
+        VolumeSize: asPositiveInt(profile.volumeSizeGiB, 80),
+        VolumeType: "gp3",
+        Encrypted: true,
+        DeleteOnTermination: true,
       },
-    ]
-    : undefined;
+    },
+  ];
 
   const mergedConfig = {
     ...(profile.config || {}),
@@ -1610,13 +1737,93 @@ export function createRouter(): Router {
   );
 
   router.get(
+    "/v1/games/:gameId/worlds/:worldId/server-config",
+    withAsync(async (req, res) => {
+      const { gameId, worldId } = req.params;
+      const world = await worldPresetsRepository.get(worldPk(gameId, worldId));
+      if (!world || !isGameWorldForGame(world, gameId)) {
+        res.status(404).json({ error: "world not found" });
+        return;
+      }
+
+      const location = await resolveWorldConfigLocation(gameId, world);
+      let configXml = await getS3ObjectText(location.bucket, location.key);
+      let sourceKey = location.key;
+      let exists = true;
+      if (configXml === undefined) {
+        exists = false;
+        for (const fallbackKey of location.fallbackKeys) {
+          configXml = await getS3ObjectText(location.bucket, fallbackKey);
+          if (configXml !== undefined) {
+            sourceKey = fallbackKey;
+            break;
+          }
+        }
+      }
+
+      res.json({
+        bucket: location.bucket,
+        key: location.key,
+        sourceKey,
+        worldPrefix: location.worldPrefix,
+        exists,
+        configXml: configXml ?? "",
+      });
+    }),
+  );
+
+  router.put(
+    "/v1/games/:gameId/worlds/:worldId/server-config",
+    withAsync(async (req, res) => {
+      const { gameId, worldId } = req.params;
+      const body = req.body as { configXml?: unknown };
+      const configXml = typeof body?.configXml === "string" ? body.configXml : "";
+      if (!configXml.trim()) {
+        res.status(400).json({ error: "configXml is required" });
+        return;
+      }
+
+      const world = await worldPresetsRepository.get(worldPk(gameId, worldId));
+      if (!world || !isGameWorldForGame(world, gameId)) {
+        res.status(404).json({ error: "world not found" });
+        return;
+      }
+
+      const location = await resolveWorldConfigLocation(gameId, world);
+      await s3Client.send(
+        new PutObjectCommand({
+          Bucket: location.bucket,
+          Key: location.key,
+          Body: configXml,
+          ContentType: "application/xml",
+        }),
+      );
+
+      const updatedWorld = {
+        ...world,
+        worldPrefix: location.worldPrefix,
+        updatedAt: new Date().toISOString(),
+      };
+      await worldPresetsRepository.put(updatedWorld);
+
+      res.json({
+        bucket: location.bucket,
+        key: location.key,
+        worldPrefix: location.worldPrefix,
+        configXml,
+      });
+    }),
+  );
+
+  router.get(
     "/v1/instances",
     withAsync(async (req, res) => {
       const gameId = req.query.gameId ? String(req.query.gameId) : undefined;
       const instances = gameId
         ? await instanceRepository.scanByField("gameId", gameId)
         : await instanceRepository.scan();
-      res.json({ instances });
+      const hydrated = await Promise.all(instances.map((instance) => hydrateInstanceFromEc2(instance)));
+      res.json({ instances: hydrated });
     }),
   );
 
@@ -1626,7 +1833,7 @@ export function createRouter(): Router {
       const instanceId = req.params.instanceId;
       const instance = await instanceRepository.get(instanceId);
       if (instance) {
-        res.json({ instance });
+        res.json({ instance: await hydrateInstanceFromEc2(instance) });
         return;
       }
 

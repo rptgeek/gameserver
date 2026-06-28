@@ -14,6 +14,7 @@ import {
   getInstance,
   getLogs,
   getOperation,
+  getWorldServerConfig,
   listProfiles,
   listWorlds,
   listGames,
@@ -22,6 +23,7 @@ import {
   startInstance,
   stopInstance,
   streamLogs,
+  saveWorldServerConfig,
   terminateInstance,
   updateConfig,
 } from './api';
@@ -51,6 +53,13 @@ interface InstanceForm {
   selectedProfileId: string;
   selectedWorldId: string;
   worldName: string;
+}
+
+interface WorldRuntimeState {
+  instance?: ServerInstance;
+  status: string;
+  publicIp?: string;
+  lastBackupAt?: string;
 }
 
 const FINISHED_OPERATION_STATUSES = new Set([
@@ -92,6 +101,36 @@ function statusClassName(raw?: string): string {
   return `status-pill ${s}`;
 }
 
+function displayUnknown(value: unknown): string {
+  return typeof value === 'string' && value.trim() ? value : '—';
+}
+
+function instanceType(instance: ServerInstance): string {
+  return displayUnknown(instance.instanceType);
+}
+
+function worldGameId(world: WorldPreset): string {
+  return world.gameId || String(world.gameRefId || '');
+}
+
+function worldS3Prefix(world: WorldPreset): string {
+  const rawPrefix = typeof world.worldPrefix === 'string' ? world.worldPrefix : '';
+  if (rawPrefix) {
+    return rawPrefix;
+  }
+  const gameId = worldGameId(world);
+  return gameId && world.worldId ? `servers/${gameId}/${world.worldId}` : '—';
+}
+
+function worldBucket(world: WorldPreset, profiles: GameProfile[]): string {
+  const explicit = typeof world.worldBucket === 'string' ? world.worldBucket : '';
+  if (explicit) {
+    return explicit;
+  }
+  const profileBucket = profiles.find((profile) => typeof profile.worldBucket === 'string')?.worldBucket;
+  return typeof profileBucket === 'string' ? profileBucket : '7d2d-state-prod';
+}
+
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -103,6 +142,7 @@ export default function App() {
   const [selectedGameId, setSelectedGameId] = useState('');
   const [instances, setInstances] = useState<ServerInstance[]>([]);
   const [instancesLoading, setInstancesLoading] = useState(false);
+  const [showTerminatedInstances, setShowTerminatedInstances] = useState(false);
   const [selectedInstance, setSelectedInstance] = useState<ServerInstance | null>(null);
 
   const [detailTab, setDetailTab] = useState<DetailTab>('overview');
@@ -137,6 +177,10 @@ export default function App() {
   const [worldName, setWorldPresetName] = useState('');
   const [worldDescription, setWorldDescription] = useState('');
   const [worldSeedText, setWorldSeedText] = useState('{\n  "seed": ""\n}');
+  const [serverConfigXml, setServerConfigXml] = useState('');
+  const [serverConfigKey, setServerConfigKey] = useState('');
+  const [serverConfigLoading, setServerConfigLoading] = useState(false);
+  const [serverConfigSaving, setServerConfigSaving] = useState(false);
 
   const pollRef = useRef<Record<string, number>>({});
   const logStreamRef = useRef<AbortController | null>(null);
@@ -293,6 +337,9 @@ export default function App() {
       return;
     }
     void refreshInstances(selectedGameId === 'all' ? undefined : selectedGameId);
+    if (selectedGameId !== 'all') {
+      void loadPresetsForGame(selectedGameId);
+    }
   }, [selectedGameId, user]);
 
   useEffect(() => {
@@ -397,6 +444,15 @@ export default function App() {
     if (isOperationRunning(instance)) {
       return;
     }
+    if (kind === 'terminate') {
+      const label = instance.serverName || instance.name || instance.instanceId || 'this instance';
+      const confirmed = window.confirm(
+        `Terminate ${label}?\n\nThis will run the final backup flow and then terminate the EC2 instance.`,
+      );
+      if (!confirmed) {
+        return;
+      }
+    }
     try {
       const id = instanceId(instance);
       let op: OperationResult;
@@ -479,7 +535,55 @@ export default function App() {
     setWorldPresetName('');
     setWorldDescription('');
     setWorldSeedText('{\n  "seed": ""\n}');
+    setServerConfigXml('');
+    setServerConfigKey('');
     setShowAddInstance(true);
+  };
+
+  const loadWorldServerConfig = async (gameId: string, worldId: string) => {
+    if (!gameId || !worldId) {
+      setServerConfigXml('');
+      setServerConfigKey('');
+      return;
+    }
+    setServerConfigLoading(true);
+    try {
+      const config = await getWorldServerConfig(gameId, worldId);
+      setServerConfigXml(config.configXml || '');
+      setServerConfigKey(`${config.bucket}/${config.key}`);
+    } catch (error) {
+      setServerConfigXml('');
+      setServerConfigKey('');
+      notify('error', error instanceof Error ? error.message : 'Unable to load serverconfig.xml');
+    } finally {
+      setServerConfigLoading(false);
+    }
+  };
+
+  const handleConfigureWorldLaunch = async (world: WorldPreset) => {
+    const gameId = worldGameId(world);
+    if (!gameId) {
+      notify('error', 'World is missing a game id');
+      return;
+    }
+    setAddForm({
+      gameId,
+      region: 'us-east-1',
+      config: '{\n  \"maxPlayers\": 64,\n  \"tickRate\": 30\n}',
+      selectedProfileId: '',
+      selectedWorldId: world.worldId,
+      worldName: world.name,
+    });
+    setProfileName('');
+    setProfileDescription('');
+    setWorldPresetName('');
+    setWorldDescription('');
+    setWorldSeedText('{\n  "seed": ""\n}');
+    setServerConfigXml('');
+    setServerConfigKey('');
+    setShowAddInstance(true);
+    await loadPresetsForGame(gameId);
+    await loadWorldServerConfig(gameId, world.worldId);
   };
 
   useEffect(() => {
@@ -495,6 +599,10 @@ export default function App() {
       return;
     }
     try {
+      if (addForm.selectedWorldId) {
+        setServerConfigSaving(true);
+        await saveWorldServerConfig(addForm.gameId, addForm.selectedWorldId, serverConfigXml);
+      }
       const configParsed = JSON.parse(addForm.config);
       const created = await createInstance({
         gameId: addForm.gameId,
@@ -514,6 +622,41 @@ export default function App() {
       } else {
         notify('error', error instanceof Error ? error.message : 'Unable to create instance');
       }
+    } finally {
+      setServerConfigSaving(false);
+    }
+  };
+
+  const handleLaunchWorld = async (world: WorldPreset) => {
+    const gameId = worldGameId(world);
+    if (!gameId || !world.worldId) {
+      notify('error', 'World is missing a game id or world id');
+      return;
+    }
+    try {
+      const availableProfiles =
+        profiles.some((profile) => profile.gameId === gameId)
+          ? profiles.filter((profile) => profile.gameId === gameId)
+          : await listProfiles(gameId);
+      if (!profiles.some((profile) => profile.gameId === gameId)) {
+        setProfiles(availableProfiles);
+      }
+      const defaultProfile = availableProfiles[0];
+      const created = await createInstance({
+        gameId,
+        region: 'us-east-1',
+        config: {},
+        selectedProfileId: defaultProfile?.profileId,
+        selectedWorldId: world.worldId,
+        worldName: world.name,
+      });
+      setInstances((current) => [created, ...current]);
+      setSelectedInstance(created);
+      setDetailTab('bootstrap-logs');
+      notify('success', `Launching ${world.name}`);
+      await refreshInstances(selectedGameId === 'all' ? undefined : selectedGameId);
+    } catch (error) {
+      notify('error', error instanceof Error ? error.message : 'Unable to launch world');
     }
   };
 
@@ -591,32 +734,54 @@ export default function App() {
     }
   };
 
-  const visibleInstances =
-    selectedGameId === '' || selectedGameId === 'all'
-      ? instances
-      : instances.filter((instance) => {
-          const game = instance.game || '';
-          const gameId = instance.gameId || '';
-          return game === selectedGameId || gameId === selectedGameId;
-        });
+  const visibleInstances = instances.filter((instance) => {
+    const status = normalizeStatus(instance.status);
+    if (!showTerminatedInstances && (status === 'terminated' || status === 'shutting-down')) {
+      return false;
+    }
+    if (selectedGameId === '' || selectedGameId === 'all') {
+      return true;
+    }
+    const game = instance.game || '';
+    const gameId = instance.gameId || '';
+    return game === selectedGameId || gameId === selectedGameId;
+  });
 
   const gameName = (instance: ServerInstance): string => {
     const found = games.find((game) => game.id === (instance.game || instance.gameId));
     return found?.name || instance.game || instance.gameId || '—';
   };
 
-  const operationCell = (instance: ServerInstance) => {
-    const op = operations[instanceId(instance)];
-    if (!op) {
-      return <span className="muted">—</span>;
-    }
-    return (
-      <span className="stack">
-        <strong>{op.status}</strong>
-        <small>{op.operationId}</small>
-      </span>
-    );
+  const worldRuntimeState = (world: WorldPreset): WorldRuntimeState => {
+    const timeValue = (instance: ServerInstance): number => {
+      const raw =
+        typeof instance.updatedAt === 'string'
+          ? instance.updatedAt
+          : instance.startedAt || (typeof instance.createdAt === 'string' ? instance.createdAt : undefined);
+      return raw ? new Date(raw).getTime() : 0;
+    };
+    const candidates = instances
+      .filter((instance) => instance.selectedWorldId === world.worldId)
+      .sort((a, b) => timeValue(b) - timeValue(a));
+    const active = candidates.find((instance) => {
+      const status = normalizeStatus(instance.status);
+      return status !== 'terminated' && status !== 'shutting-down' && status !== 'stopped';
+    });
+    const latest = active || candidates[0];
+    return {
+      instance: latest,
+      status: active ? normalizeStatus(active.status) : 'offline',
+      publicIp: active?.publicIp,
+      lastBackupAt:
+        typeof latest?.lastBackupAt === 'string'
+          ? latest.lastBackupAt
+          : undefined,
+    };
   };
+
+  const visibleWorlds = selectedGameId && selectedGameId !== 'all'
+    ? worlds.filter((world) => worldGameId(world) === selectedGameId)
+    : [];
 
   if (bootstrapping) {
     return (
@@ -669,7 +834,7 @@ export default function App() {
       <main className="dashboard-grid">
         <section className="panel">
           <div className="panel-head">
-            <h2>Server list</h2>
+            <h2>Saved worlds</h2>
             <div className="toolbar">
               <label htmlFor="game-filter" className="sr-only">
                 Game filter
@@ -687,11 +852,75 @@ export default function App() {
                   </option>
                 ))}
               </select>
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={showTerminatedInstances}
+                  onChange={(event) => setShowTerminatedInstances(event.target.checked)}
+                />
+                Show terminated
+              </label>
               <button type="button" className="btn btn-success" onClick={handleOpenAddModal}>
                 Add instance
               </button>
             </div>
           </div>
+
+          {selectedGameId === 'all' || !selectedGameId ? (
+            <div className="empty">Choose a game to see saved worlds from its S3 save paths.</div>
+          ) : visibleWorlds.length === 0 ? (
+            <div className="empty">No saved worlds found for this game. Create a world preset to launch from S3.</div>
+          ) : (
+            <div className="world-grid">
+              {visibleWorlds.map((world) => {
+                const runtime = worldRuntimeState(world);
+                const active = runtime.status !== 'offline';
+                return (
+                  <article className="world-card" key={world.worldId}>
+                    <div className="world-card-head">
+                      <div>
+                        <h3>{world.name}</h3>
+                        <p>{world.description || 'Saved world'}</p>
+                      </div>
+                      <span className={statusClassName(runtime.status)}>{runtime.status}</span>
+                    </div>
+                    <div className="world-meta">
+                      <span>Bucket</span>
+                      <strong>{worldBucket(world, profiles)}</strong>
+                      <span>S3 path</span>
+                      <strong>{worldS3Prefix(world)}/state</strong>
+                      <span>Last backup</span>
+                      <strong>{prettyDate(runtime.lastBackupAt)}</strong>
+                      <span>Public IP</span>
+                      <strong>{runtime.publicIp || '—'}</strong>
+                    </div>
+                    <div className="row-actions">
+                      <button
+                        type="button"
+                        className="btn btn-success"
+                        disabled={active}
+                        onClick={() => handleConfigureWorldLaunch(world)}
+                      >
+                        Configure & launch
+                      </button>
+                      {runtime.instance && (
+                        <button
+                          type="button"
+                          className="btn btn-small"
+                          onClick={() => {
+                            setSelectedInstance(runtime.instance || null);
+                            setDetailTab(active ? 'server-logs' : 'overview');
+                          }}
+                        >
+                          {active ? 'View running server' : 'View last launch'}
+                        </button>
+                      )}
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          )}
 
           <div className="table-wrap">
             {instancesLoading ? (
@@ -704,15 +933,13 @@ export default function App() {
                   <tr>
                     <th>Game</th>
                     <th>Instance ID</th>
-                    <th>Resource ID</th>
-                    <th>Profile</th>
+                    <th>Instance type</th>
                     <th>World</th>
                     <th>Status</th>
                     <th>Region</th>
                     <th>Public IP</th>
                     <th>Started At</th>
                     <th>Actions</th>
-                    <th>Operation</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -723,8 +950,7 @@ export default function App() {
                       <tr key={id}>
                         <td>{gameName(instance)}</td>
                         <td>{id}</td>
-                        <td>{instance.gameInstanceResourceId || instance.resourceId || '—'}</td>
-                        <td>{instance.selectedProfileId || '—'}</td>
+                        <td>{instanceType(instance)}</td>
                         <td>{instance.worldName || instance.selectedWorldId || '—'}</td>
                         <td>
                           <span className={statusClassName(instance.status)}>{normalizeStatus(instance.status)}</span>
@@ -765,14 +991,14 @@ export default function App() {
                               Config
                             </button>
                             <button className="btn btn-small" disabled={disabled} onClick={() => handleAction(instance, 'start')}>
-                              Start
+                              Launch
                             </button>
                             <button
                               className="btn btn-small"
                               disabled={disabled}
                               onClick={() => handleAction(instance, 'stop')}
                             >
-                              Stop
+                              Shutdown
                             </button>
                             <button
                               className="btn btn-small"
@@ -790,7 +1016,6 @@ export default function App() {
                             </button>
                           </div>
                         </td>
-                        <td>{operationCell(instance)}</td>
                       </tr>
                     );
                   })}
@@ -861,10 +1086,6 @@ export default function App() {
                       <strong>{instanceId(selectedInstance)}</strong>
                     </div>
                     <div className="kv">
-                      <span>Resource</span>
-                      <strong>{selectedInstance.gameInstanceResourceId || selectedInstance.resourceId || '—'}</strong>
-                    </div>
-                    <div className="kv">
                       <span>Region</span>
                       <strong>{selectedInstance.region || '—'}</strong>
                     </div>
@@ -881,8 +1102,8 @@ export default function App() {
                       <span className={statusClassName(selectedInstance.status)}>{normalizeStatus(selectedInstance.status)}</span>
                     </div>
                     <div className="kv">
-                      <span>Selected profile</span>
-                      <strong>{selectedInstance.selectedProfileId || '—'}</strong>
+                      <span>Instance type</span>
+                      <strong>{instanceType(selectedInstance)}</strong>
                     </div>
                     <div className="kv">
                       <span>Selected world</span>
@@ -894,14 +1115,14 @@ export default function App() {
                         disabled={isOperationRunning(selectedInstance)}
                         onClick={() => handleAction(selectedInstance, 'start')}
                       >
-                        Start
+                        Launch
                       </button>
                       <button
                         className="btn btn-small"
                         disabled={isOperationRunning(selectedInstance)}
                         onClick={() => handleAction(selectedInstance, 'stop')}
                       >
-                        Stop
+                        Shutdown
                       </button>
                       <button
                         className="btn btn-small"
@@ -982,7 +1203,7 @@ export default function App() {
       {showAddInstance && (
         <div className="modal-backdrop" role="dialog" aria-modal="true">
           <div className="modal">
-            <h3>Create instance</h3>
+            <h3>Configure launch</h3>
             <label>
               Game
               <select
@@ -1043,6 +1264,7 @@ export default function App() {
                     selectedWorldId,
                     worldName: selectedWorld?.name ?? previous.worldName,
                   }));
+                  void loadWorldServerConfig(addForm.gameId, selectedWorldId);
                 }}
               >
                 <option value="">No world preset</option>
@@ -1114,19 +1336,28 @@ export default function App() {
               </button>
             </div>
             <label>
-              Config (JSON)
+              serverconfig.xml
+              {serverConfigKey && <small className="field-hint">S3: {serverConfigKey}</small>}
               <textarea
-                rows={10}
-                value={addForm.config}
-                onChange={(event) => setAddForm((previous) => ({ ...previous, config: event.target.value }))}
+                rows={18}
+                value={serverConfigLoading ? 'Loading serverconfig.xml…' : serverConfigXml}
+                onChange={(event) => setServerConfigXml(event.target.value)}
+                disabled={serverConfigLoading}
+                spellCheck={false}
+                className="xml-editor"
               />
             </label>
             <div className="modal-actions">
               <button type="button" className="btn btn-small" onClick={() => setShowAddInstance(false)}>
                 Cancel
               </button>
-              <button type="button" className="btn btn-success" onClick={handleCreateInstance}>
-                Launch instance
+              <button
+                type="button"
+                className="btn btn-success"
+                onClick={handleCreateInstance}
+                disabled={serverConfigLoading || serverConfigSaving}
+              >
+                {serverConfigSaving ? 'Saving config…' : 'Save config & launch'}
               </button>
             </div>
           </div>
