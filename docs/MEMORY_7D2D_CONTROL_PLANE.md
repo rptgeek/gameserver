@@ -146,7 +146,7 @@ The saved-world delete route:
 - Deletes S3 objects under the world prefix.
 - Deletes the DynamoDB world record.
 
-Important follow-up: CDK IAM currently grants backend Lambda `s3:GetObject`, `s3:PutObject`, and `s3:ListBucket`. The new delete-world route also needs `s3:DeleteObject` on `arn:aws:s3:::*/*`. Copy uses S3 copy semantics and should be covered by Get source + Put target, but delete definitely needs explicit DeleteObject permission before delete-world works in AWS.
+CDK IAM grants backend Lambda `s3:GetObject`, `s3:PutObject`, `s3:DeleteObject`, and `s3:ListBucket` so saved-world copy/delete can manage S3 world prefixes.
 
 ## Frontend Console
 
@@ -384,7 +384,6 @@ Recommended Windrose MVP:
 
 - Frontend deploy did not complete because local AWS CloudFormation endpoint access failed after backend deploy.
 - Backend TypeScript strict build currently fails on existing baseline issues, although CDK Lambda bundling/deploy succeeded. Baseline issues include serverless-express import shape, AWS enum typing, old `req.params` typing, and model fields used before being declared.
-- New saved-world delete needs Lambda IAM `s3:DeleteObject`; CDK policy currently lacks it.
 - CDK `projectName` default in `infra/cdk.json` is `7d2d`, which produces invalid stack id `7d2d-dev`. Use `PROJECT_NAME=gameserver` or change the CDK naming strategy.
 - Current log retention in infra is 3 days for `/7d2d/bootstrap` and `/7d2d/server`, while operational docs recommend longer retention for some logs.
 - The 7D2D config editing flow is game-specific. Windrose should not inherit `serverconfig.xml` assumptions unless it has an equivalent config file.
@@ -428,4 +427,3 @@ Recent completed work includes:
 - API CORS/OPTIONS handling.
 - Saved-world copy and delete API/client/UI.
 - Instance lifecycle normalization for stopped/terminated EC2 states.
-

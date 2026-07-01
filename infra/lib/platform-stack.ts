@@ -247,7 +247,7 @@ export class PlatformInfraStack extends cdk.Stack {
       new iam.PolicyStatement({
         sid: 'WorldConfigS3Access',
         effect: iam.Effect.ALLOW,
-        actions: ['s3:GetObject', 's3:PutObject'],
+        actions: ['s3:GetObject', 's3:PutObject', 's3:DeleteObject'],
         resources: ['arn:aws:s3:::*/*'],
       }),
     );
