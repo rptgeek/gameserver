@@ -390,7 +390,7 @@ fi
 zero_since="$(cat "${STATE_FILE}" 2>/dev/null || echo "${now}")"
 if (( now - zero_since >= IDLE_LIMIT_SECONDS )); then
   echo "No players for at least ${IDLE_LIMIT_SECONDS}s; backing up and terminating instance."
-  "/opt/{{GAME_SERVICE}}-tools/upload-state.sh" || true
+  "/opt/${GAME_SERVICE}-tools/upload-state.sh" || true
   systemctl stop "${GAME_SERVICE}-server.service" || true
   instance_id="$(curl -fsS http://169.254.169.254/latest/meta-data/instance-id)"
   region="$(curl -fsS http://169.254.169.254/latest/dynamic/instance-identity/document | sed -n 's/.*"region"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
@@ -405,7 +405,7 @@ STOP_TIMEOUT_SECONDS='{{STOP_TIMEOUT_SECONDS}}'
 GAME_SERVICE='{{GAME_SERVICE}}'
 if [[ "${GAME_SERVICE}" == "windrose" ]] && command -v docker >/dev/null 2>&1; then
   docker stop --time "${STOP_TIMEOUT_SECONDS}" WindroseServer >/dev/null 2>&1 || true
-  "/opt/{{GAME_SERVICE}}-tools/upload-state.sh" || true
+  "/opt/${GAME_SERVICE}-tools/upload-state.sh" || true
   exit 0
 fi
 game_pids="$(pgrep -f "7DaysToDieServer.x86_64" || true)"
@@ -421,7 +421,7 @@ if [[ -n "${remaining}" ]]; then
     kill -s KILL "${game_pid}" 2>/dev/null || true
   done <<< "${remaining}"
 fi
-"/opt/{{GAME_SERVICE}}-tools/upload-state.sh" || true
+"/opt/${GAME_SERVICE}-tools/upload-state.sh" || true
 EOS
 
 cat > "/opt/${GAME_SERVICE}-tools/start-server.command" <<'EOS'
@@ -576,7 +576,9 @@ if [[ -n "${GAMECONFIG_LOCAL_PATH}" && ! -f "${GAMECONFIG_LOCAL_PATH}" ]]; then
 XML
 fi
 mkdir -p "${GAME_HOME}"
-mkdir -p "${STATE_LINK%/*}" || true
+if [[ -n "${STATE_LINK:-}" ]]; then
+  mkdir -p "${STATE_LINK%/*}" || true
+fi
 mkdir -p "/home/$(whoami)/.local/share/7DaysToDie" || true
 ensure_steamclient
 eval "$(printf '%s' "${GAME_START_CMD_B64}" | base64 -d)"
@@ -589,8 +591,9 @@ NOTICE_URL="http://169.254.169.254/latest/meta-data/spot/instance-action"
 while true; do
   if notice="$(curl -fsS --max-time 1 "${NOTICE_URL}" || true)"; then
     if [[ "${notice}" == *\"action\"* ]]; then
-      "/opt/{{GAME_SERVICE}}-tools/upload-state.sh" || true
-      /usr/bin/systemctl stop "{{GAME_SERVICE}}-server.service" || true
+      GAME_SERVICE='{{GAME_SERVICE}}'
+      "/opt/${GAME_SERVICE}-tools/upload-state.sh" || true
+      /usr/bin/systemctl stop "${GAME_SERVICE}-server.service" || true
       /usr/sbin/shutdown -h now "Spot termination notice"
       exit 0
     fi
