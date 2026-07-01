@@ -776,6 +776,47 @@ function booleanField(record: Record<string, unknown> | undefined, key: string):
   return typeof value === "boolean" ? value : undefined;
 }
 
+function windroseServerSettings(
+  record: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  const nested = record?.ServerDescription_Persistent;
+  return isObject(nested) ? nested : record;
+}
+
+function windroseWorldSettings(
+  record: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  const nested = record?.WorldDescription;
+  return isObject(nested) ? nested : record;
+}
+
+function windroseWorldFloat(
+  record: Record<string, unknown> | undefined,
+  suffix: string,
+): number | undefined {
+  const worldSettings = windroseWorldSettings(record)?.WorldSettings;
+  const floatParameters = isObject(worldSettings)
+    ? worldSettings.FloatParameters
+    : undefined;
+  if (!isObject(floatParameters)) return undefined;
+  const match = Object.entries(floatParameters).find(([key]) => key.includes(`WDS.Parameter.${suffix}`));
+  return typeof match?.[1] === "number" && Number.isFinite(match[1]) ? match[1] : undefined;
+}
+
+function windroseCombatDifficulty(record: Record<string, unknown> | undefined): string | undefined {
+  const worldSettings = windroseWorldSettings(record)?.WorldSettings;
+  const tagParameters = isObject(worldSettings)
+    ? worldSettings.TagParameters
+    : undefined;
+  if (!isObject(tagParameters)) return textField(windroseWorldSettings(record), "CombatDifficulty");
+  const match = Object.entries(tagParameters).find(([key]) => key.includes("WDS.Parameter.CombatDifficulty"));
+  const value = match?.[1];
+  if (isObject(value)) {
+    return textField(value, "TagName")?.split(".").pop();
+  }
+  return undefined;
+}
+
 function isSafeWorldJsonKey(key: unknown, worldPrefix: string, basename: string): key is string {
   if (typeof key !== "string" || !key.trim()) return false;
   const normalizedKey = key.replace(/^\/+/, "");
@@ -2296,7 +2337,8 @@ export function createRouter(): Router {
 
       let worldDescription: Record<string, unknown> | undefined;
       let worldDescriptionKey: string | undefined;
-      const worldIslandId = textField(serverDescription, "WorldIslandId");
+      const serverSettings = windroseServerSettings(serverDescription);
+      const worldIslandId = textField(serverSettings, "WorldIslandId");
       const candidateWorldDescriptionKeys = [
         ...worldDescriptionKeys,
         ...(worldIslandId
@@ -2328,18 +2370,22 @@ export function createRouter(): Router {
         bucket: location.bucket,
         worldPrefix: location.worldPrefix,
         inviteCode:
-          textField(serverDescription, "InviteCode") ||
-          textField(serverDescription, "inviteCode"),
+          textField(serverSettings, "InviteCode") ||
+          textField(serverSettings, "inviteCode"),
         serverName:
-          textField(serverDescription, "ServerName") ||
-          textField(serverDescription, "Name") ||
-          textField(serverDescription, "name"),
-        isPasswordProtected: booleanField(serverDescription, "IsPasswordProtected"),
-        maxPlayerCount: numberField(serverDescription, "MaxPlayerCount"),
+          textField(serverSettings, "ServerName") ||
+          textField(serverSettings, "Name") ||
+          textField(serverSettings, "name"),
+        isPasswordProtected: booleanField(serverSettings, "IsPasswordProtected"),
+        maxPlayerCount: numberField(serverSettings, "MaxPlayerCount"),
         worldIslandId,
-        combatDifficulty: textField(worldDescription, "CombatDifficulty"),
-        mobHealthMultiplier: numberField(worldDescription, "MobHealthMultiplier"),
-        mobDamageMultiplier: numberField(worldDescription, "MobDamageMultiplier"),
+        combatDifficulty: windroseCombatDifficulty(worldDescription),
+        mobHealthMultiplier:
+          numberField(windroseWorldSettings(worldDescription), "MobHealthMultiplier") ||
+          windroseWorldFloat(worldDescription, "MobHealthMultiplier"),
+        mobDamageMultiplier:
+          numberField(windroseWorldSettings(worldDescription), "MobDamageMultiplier") ||
+          windroseWorldFloat(worldDescription, "MobDamageMultiplier"),
         serverDescriptionKey,
         worldDescriptionKey,
         serverDescription,
@@ -2434,11 +2480,14 @@ export function createRouter(): Router {
           await writeJson(body.worldDescriptionKey, body.worldDescription);
         } else {
           const islandId =
-            textField(isObject(body.serverDescription) ? body.serverDescription : undefined, "WorldIslandId") ||
-            textField(body.worldDescription, "IslandId");
+            textField(
+              windroseServerSettings(isObject(body.serverDescription) ? body.serverDescription : undefined),
+              "WorldIslandId",
+            ) ||
+            textField(windroseWorldSettings(body.worldDescription), "IslandId");
           if (islandId) {
             await writeJson(
-              `${location.worldPrefix.replace(/\/+$/, "")}/state/Saved/SaveProfiles/Default/Worlds/${islandId}/WorldDescription.json`,
+              `${location.worldPrefix.replace(/\/+$/, "")}/state/Saved/SaveProfiles/Default/RocksDB_v2/current/Worlds/${islandId}/WorldDescription.json`,
               body.worldDescription,
             );
           }

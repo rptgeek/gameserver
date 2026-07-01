@@ -97,7 +97,13 @@ if ! id -u "${SERVICE_USER}" >/dev/null 2>&1; then
   SERVICE_USER="root"
 fi
 
-if [[ -z "${STATE_LINK}" ]]; then
+DISABLE_STATE_LINK=0
+if [[ "${STATE_LINK}" == "__none__" ]]; then
+  DISABLE_STATE_LINK=1
+  STATE_LINK=""
+fi
+
+if [[ -z "${STATE_LINK}" && "${DISABLE_STATE_LINK}" != "1" ]]; then
   SERVICE_USER_HOME="$(getent passwd "${SERVICE_USER}" | cut -d: -f6 || true)"
   if [[ -z "${SERVICE_USER_HOME}" ]]; then
     SERVICE_USER_HOME="/home/${SERVICE_USER}"
@@ -107,29 +113,41 @@ else
   STATE_LINK="${STATE_LINK%/}"
 fi
 
-mkdir -p "${STATE_LINK%/*}"
-mkdir -p "${STATE_LINK%/*}/.local/share"
+if [[ "${DISABLE_STATE_LINK}" != "1" ]]; then
+  mkdir -p "${STATE_LINK%/*}"
+  mkdir -p "${STATE_LINK%/*}/.local/share"
+fi
 mkdir -p "${GAME_HOME}"
 mkdir -p "/var/log/${GAME_NAME}"
 touch "/var/log/${GAME_NAME}/bootstrap.log" \
   "/var/log/${GAME_NAME}/server.log" \
   "/var/log/${GAME_NAME}/server.error.log"
 mkdir -p "/etc/systemd/system"
-ln -sfn "${STATE_DIR_PATH}" "${STATE_LINK}"
+if [[ "${DISABLE_STATE_LINK}" != "1" ]]; then
+  ln -sfn "${STATE_DIR_PATH}" "${STATE_LINK}"
+fi
 mkdir -p "/opt/${GAME_SERVICE}-tools"
 
 if id -u "${SERVICE_USER}" >/dev/null 2>&1; then
+  chown_paths=("${STATE_DIR_PATH}" "${GAME_HOME}" "/var/log/${GAME_NAME}")
+  if [[ "${DISABLE_STATE_LINK}" != "1" ]]; then
+    chown_paths+=("${STATE_LINK%/*}")
+  fi
   chown -R "${SERVICE_USER}:${SERVICE_USER}" \
-    "${STATE_DIR_PATH}" \
-    "${STATE_LINK%/*}" \
-    "${GAME_HOME}" \
-    "/var/log/${GAME_NAME}" || true
+    "${chown_paths[@]}" || true
   chmod -R u+rwX "${STATE_DIR_PATH}" || true
   chmod -R u+rwX "/var/log/${GAME_NAME}" || true
 fi
 
 restore_state() {
-  aws s3 sync "s3://${WORLD_BUCKET}/${WORLD_PREFIX}/state/" "${STATE_DIR_PATH}/" || true
+  if [[ "${GAME_SERVICE}" == "windrose" ]]; then
+    mkdir -p "${STATE_DIR_PATH}/Saved"
+    aws s3 sync "s3://${WORLD_BUCKET}/${WORLD_PREFIX}/state/Saved/" "${STATE_DIR_PATH}/Saved/" || true
+    aws s3 cp "s3://${WORLD_BUCKET}/${WORLD_PREFIX}/config/windrose/ServerDescription.json" "${STATE_DIR_PATH}/ServerDescription.json" || \
+      aws s3 cp "s3://${WORLD_BUCKET}/${WORLD_PREFIX}/state/ServerDescription.json" "${STATE_DIR_PATH}/ServerDescription.json" || true
+  else
+    aws s3 sync "s3://${WORLD_BUCKET}/${WORLD_PREFIX}/state/" "${STATE_DIR_PATH}/" || true
+  fi
   if [[ -d "${STATE_DIR_PATH}" ]] && [[ -n "${SERVICE_USER}" ]] && id -u "${SERVICE_USER}" >/dev/null 2>&1; then
     chown -R "${SERVICE_USER}:${SERVICE_USER}" "${STATE_DIR_PATH}" || true
     chmod -R u+rwX "${STATE_DIR_PATH}" || true
@@ -199,6 +217,22 @@ EOF
 }
 
 upload_state() {
+  if [[ "${GAME_SERVICE}" == "windrose" ]]; then
+    mkdir -p "${STATE_DIR_PATH}/Saved"
+    if command -v docker >/dev/null 2>&1 && docker container inspect WindroseServer >/dev/null 2>&1; then
+      docker cp WindroseServer:/home/ue_user/app/R5/ServerDescription.json "${STATE_DIR_PATH}/ServerDescription.json" >/dev/null 2>&1 || true
+    fi
+    aws s3 sync "${STATE_DIR_PATH}/Saved/" "s3://${WORLD_BUCKET}/${WORLD_PREFIX}/state/Saved/" --delete || true
+    if [[ -f "${STATE_DIR_PATH}/ServerDescription.json" ]]; then
+      aws s3 cp "${STATE_DIR_PATH}/ServerDescription.json" "s3://${WORLD_BUCKET}/${WORLD_PREFIX}/state/ServerDescription.json" || true
+      aws s3 cp "${STATE_DIR_PATH}/ServerDescription.json" "s3://${WORLD_BUCKET}/${WORLD_PREFIX}/config/windrose/ServerDescription.json" || true
+    fi
+    world_description="$(find "${STATE_DIR_PATH}/Saved" -type f -name WorldDescription.json 2>/dev/null | head -n 1 || true)"
+    if [[ -n "${world_description}" ]] && [[ -f "${world_description}" ]]; then
+      aws s3 cp "${world_description}" "s3://${WORLD_BUCKET}/${WORLD_PREFIX}/config/windrose/WorldDescription.json" || true
+    fi
+    return 0
+  fi
   aws s3 sync "${STATE_DIR_PATH}/" "s3://${WORLD_BUCKET}/${WORLD_PREFIX}/state/" --delete || true
 }
 
@@ -287,14 +321,22 @@ GAME_SERVICE='{{GAME_SERVICE}}'
 GAMECONFIG_LOCAL_PATH='{{GAMECONFIG_LOCAL_PATH}}'
 GAMECONFIG_S3_KEY='{{GAMECONFIG_S3_KEY}}'
 if [[ -n "${WORLD_BUCKET}" ]] && [[ -n "${WORLD_PREFIX}" ]]; then
-  aws s3 sync "${STATE_DIR_PATH}/" "s3://${WORLD_BUCKET}/${WORLD_PREFIX}/state/" --delete || true
+  if [[ "${GAME_SERVICE}" == "windrose" ]]; then
+    mkdir -p "${STATE_DIR_PATH}/Saved"
+    if command -v docker >/dev/null 2>&1 && docker container inspect WindroseServer >/dev/null 2>&1; then
+      docker cp WindroseServer:/home/ue_user/app/R5/ServerDescription.json "${STATE_DIR_PATH}/ServerDescription.json" >/dev/null 2>&1 || true
+    fi
+    aws s3 sync "${STATE_DIR_PATH}/Saved/" "s3://${WORLD_BUCKET}/${WORLD_PREFIX}/state/Saved/" --delete || true
+  else
+    aws s3 sync "${STATE_DIR_PATH}/" "s3://${WORLD_BUCKET}/${WORLD_PREFIX}/state/" --delete || true
+  fi
 fi
 if [[ -n "${GAMECONFIG_LOCAL_PATH}" ]] && [[ -n "${GAMECONFIG_S3_KEY}" ]] && [[ -f "${GAMECONFIG_LOCAL_PATH}" ]]; then
   aws s3 cp "${GAMECONFIG_LOCAL_PATH}" "s3://${WORLD_BUCKET}/${GAMECONFIG_S3_KEY}" || true
 fi
 if [[ "${GAME_SERVICE}" == "windrose" ]] && [[ -n "${WORLD_BUCKET}" ]] && [[ -n "${WORLD_PREFIX}" ]]; then
   server_description="${STATE_DIR_PATH}/ServerDescription.json"
-  world_description="$(find "${STATE_DIR_PATH}" -type f -name WorldDescription.json 2>/dev/null | head -n 1 || true)"
+  world_description="$(find "${STATE_DIR_PATH}/Saved" -type f -name WorldDescription.json 2>/dev/null | head -n 1 || true)"
   if [[ -f "${server_description}" ]]; then
     echo "Windrose ServerDescription.json: ${server_description}"
     aws s3 cp "${server_description}" "s3://${WORLD_BUCKET}/${WORLD_PREFIX}/config/windrose/ServerDescription.json" || true
@@ -360,6 +402,12 @@ cat > "/opt/${GAME_SERVICE}-tools/stop-server.command" <<'EOS'
 #!/usr/bin/env bash
 set -euo pipefail
 STOP_TIMEOUT_SECONDS='{{STOP_TIMEOUT_SECONDS}}'
+GAME_SERVICE='{{GAME_SERVICE}}'
+if [[ "${GAME_SERVICE}" == "windrose" ]] && command -v docker >/dev/null 2>&1; then
+  docker stop --time "${STOP_TIMEOUT_SECONDS}" WindroseServer >/dev/null 2>&1 || true
+  "/opt/{{GAME_SERVICE}}-tools/upload-state.sh" || true
+  exit 0
+fi
 game_pids="$(pgrep -f "7DaysToDieServer.x86_64" || true)"
 if [[ -n "${game_pids}" ]]; then
   while IFS= read -r game_pid; do
@@ -662,11 +710,12 @@ if [[ -n "${GAMECONFIG_S3_KEY}" ]]; then
 fi
 
 if id -u "${SERVICE_USER}" >/dev/null 2>&1; then
+  final_chown_paths=("${GAME_HOME}" "${STATE_DIR_PATH}" "/var/log/${GAME_NAME}")
+  if [[ "${DISABLE_STATE_LINK}" != "1" ]]; then
+    final_chown_paths+=("${STATE_LINK%/*}")
+  fi
   chown -R "${SERVICE_USER}:${SERVICE_USER}" \
-    "${GAME_HOME}" \
-    "${STATE_DIR_PATH}" \
-    "${STATE_LINK%/*}" \
-    "/var/log/${GAME_NAME}" || true
+    "${final_chown_paths[@]}" || true
   chmod -R u+rwX "${STATE_DIR_PATH}" "/var/log/${GAME_NAME}" || true
 fi
 

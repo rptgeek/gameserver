@@ -215,6 +215,7 @@ def main() -> None:
         "ingressCidr": safe_str(env.get("GAME_INGRESS_CIDR"), fallback=""),
         "backupIntervalMinutes": backup_interval,
         "stopTimeoutSeconds": stop_timeout,
+        "volumeSizeGiB": volume_size,
         "gameName": game_id,
         "gameHome": safe_str(env.get("GAME_HOME"), fallback=f"/opt/{game_id}"),
         "stateLink": safe_str(env.get("STATE_LINK"), fallback=""),
@@ -230,6 +231,14 @@ def main() -> None:
           fallback=f"/opt/{game_id}/serverconfig.xml" if manages_game_config else "",
         ),
         "ensureSecurityGroupRules": safe_str(env.get("ENSURE_PROFILE_SECURITY_GROUP_RULES"), fallback="") == "1",
+        "profileEnv": {
+          key: value
+          for key, value in {
+            "SERVICE_USER": safe_str(env.get("SERVICE_USER"), fallback=""),
+            "MANAGE_GAME_CONFIG": safe_str(env.get("MANAGE_GAME_CONFIG"), fallback=""),
+          }.items()
+          if value
+        },
         "createdAt": now,
         "updatedAt": now,
       }
