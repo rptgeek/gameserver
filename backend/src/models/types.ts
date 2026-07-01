@@ -80,6 +80,9 @@ export interface WorldPresetItem {
   currentInstanceId?: string;
   currentInstanceGameId?: string;
   worldPrefix?: string;
+  saveVersion?: string;
+  saveVersionUpdatedAt?: string;
+  lastBackupAt?: string;
   createdAt: string;
   updatedAt: string;
   createdBy?: string;
@@ -220,6 +223,11 @@ export interface SaveWorldRequest {
   name: string;
   description?: string;
   worldSeed?: Record<string, unknown>;
+}
+
+export interface CopyWorldRequest {
+  name?: string;
+  description?: string;
 }
 
 export type SupportedAction = "start" | "stop" | "restart" | "terminate" | "reboot";

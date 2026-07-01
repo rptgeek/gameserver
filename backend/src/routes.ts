@@ -19,7 +19,10 @@ import {
   SendCommandCommand,
 } from "@aws-sdk/client-ssm";
 import {
+  CopyObjectCommand,
+  DeleteObjectsCommand,
   GetObjectCommand,
+  ListObjectsV2Command,
   NoSuchKey,
   PutObjectCommand,
 } from "@aws-sdk/client-s3";
@@ -43,6 +46,7 @@ import {
   GameProfileItem,
   WorldPresetItem,
   OperationItem,
+  CopyWorldRequest,
   SaveProfileRequest,
   SaveWorldRequest,
   UserContext,
@@ -582,8 +586,22 @@ function canonicalWorldPrefix(basePrefix: string, gameId: string, worldId: strin
   return `${basePrefix.replace(/\/+$/, "")}/${gameId}/${sanitizeToken(worldId)}`;
 }
 
+function siblingWorldPrefix(sourcePrefix: string, gameId: string, worldId: string): string {
+  const normalizedSource = sourcePrefix.replace(/\/+$/, "");
+  const marker = `/${gameId}/`;
+  const markerIndex = normalizedSource.lastIndexOf(marker);
+  if (markerIndex >= 0) {
+    return canonicalWorldPrefix(normalizedSource.slice(0, markerIndex), gameId, worldId);
+  }
+  return canonicalWorldPrefix("servers", gameId, worldId);
+}
+
 function worldConfigKey(worldPrefix: string): string {
   return `${worldPrefix.replace(/\/+$/, "")}/config/serverconfig.xml`;
+}
+
+function worldPrefixRoot(worldPrefix: string): string {
+  return `${worldPrefix.replace(/\/+$/, "")}/`;
 }
 
 function profilePk(gameId: string, profileId: string): string {
@@ -612,6 +630,28 @@ function recordGameId(record: {
     return record.gameId.trim();
   }
   return gameIdFromRecordKey(record.pk);
+}
+
+function routeParam(value: string | string[] | undefined): string {
+  return Array.isArray(value) ? value[0] ?? "" : value ?? "";
+}
+
+function instanceStateText(instance: InstanceItem): string {
+  if (typeof instance.status === "string" && instance.status.trim()) {
+    return instance.status.toLowerCase();
+  }
+  const ec2State = instance.ec2State as unknown;
+  if (typeof ec2State === "string") {
+    return ec2State.toLowerCase();
+  }
+  if (
+    ec2State &&
+    typeof ec2State === "object" &&
+    typeof (ec2State as { Name?: unknown }).Name === "string"
+  ) {
+    return (ec2State as { Name: string }).Name.toLowerCase();
+  }
+  return "";
 }
 
 function isGameProfileForGame(profile: GameProfileItem, gameId: string): boolean {
@@ -664,6 +704,69 @@ async function getS3ObjectText(bucket: string, key: string): Promise<string | un
     }
     throw error;
   }
+}
+
+function copySourceFor(bucket: string, key: string): string {
+  return `${bucket}/${encodeURIComponent(key).replace(/%2F/g, "/")}`;
+}
+
+async function listS3Keys(bucket: string, prefix: string): Promise<string[]> {
+  const keys: string[] = [];
+  let continuationToken: string | undefined;
+
+  do {
+    const response = await s3Client.send(
+      new ListObjectsV2Command({
+        Bucket: bucket,
+        Prefix: prefix,
+        ContinuationToken: continuationToken,
+      }),
+    );
+    for (const object of response.Contents ?? []) {
+      if (object.Key) {
+        keys.push(object.Key);
+      }
+    }
+    continuationToken = response.IsTruncated ? response.NextContinuationToken : undefined;
+  } while (continuationToken);
+
+  return keys;
+}
+
+async function copyS3Prefix(bucket: string, sourcePrefix: string, targetPrefix: string): Promise<number> {
+  const sourceRoot = worldPrefixRoot(sourcePrefix);
+  const targetRoot = worldPrefixRoot(targetPrefix);
+  const keys = await listS3Keys(bucket, sourceRoot);
+
+  for (const key of keys) {
+    const targetKey = `${targetRoot}${key.slice(sourceRoot.length)}`;
+    await s3Client.send(
+      new CopyObjectCommand({
+        Bucket: bucket,
+        Key: targetKey,
+        CopySource: copySourceFor(bucket, key),
+      }),
+    );
+  }
+
+  return keys.length;
+}
+
+async function deleteS3Prefix(bucket: string, prefix: string): Promise<number> {
+  const keys = await listS3Keys(bucket, worldPrefixRoot(prefix));
+  for (let index = 0; index < keys.length; index += 1000) {
+    const chunk = keys.slice(index, index + 1000);
+    await s3Client.send(
+      new DeleteObjectsCommand({
+        Bucket: bucket,
+        Delete: {
+          Objects: chunk.map((Key) => ({ Key })),
+          Quiet: true,
+        },
+      }),
+    );
+  }
+  return keys.length;
 }
 
 async function resolveWorldConfigLocation(
@@ -927,12 +1030,41 @@ function shouldRefreshInstanceFromEc2(instance: InstanceItem): boolean {
   return !["terminated"].includes(status) && !["terminated"].includes(ec2State);
 }
 
+function normalizeInstanceLifecycle(instance: InstanceItem): InstanceItem {
+  const ec2State = (instance.ec2State || "").toLowerCase();
+  if (ec2State === "terminated" || ec2State === "shutting-down") {
+    return {
+      ...instance,
+      status: "terminated",
+      publicIp: undefined,
+    };
+  }
+  if (ec2State === "stopped") {
+    return {
+      ...instance,
+      status: "terminated",
+      publicIp: undefined,
+    };
+  }
+  return instance;
+}
+
 async function hydrateInstanceFromEc2(instance: InstanceItem): Promise<InstanceItem> {
   if (!instance.instanceId || !shouldRefreshInstanceFromEc2(instance)) {
-    return instance;
+    const normalized = normalizeInstanceLifecycle(instance);
+    if (
+      normalized.status !== instance.status ||
+      normalized.publicIp !== instance.publicIp
+    ) {
+      await instanceRepository.put({
+        ...normalized,
+        updatedAt: new Date().toISOString(),
+      });
+    }
+    return normalized;
   }
   const snapshot = await describeEc2InstanceSnapshot(instance.instanceId);
-  if (!snapshot) return instance;
+  if (!snapshot) return normalizeInstanceLifecycle(instance);
 
   const next: InstanceItem = {
     ...instance,
@@ -946,18 +1078,19 @@ async function hydrateInstanceFromEc2(instance: InstanceItem): Promise<InstanceI
         : instance.status,
     updatedAt: new Date().toISOString(),
   };
+  const normalizedNext = normalizeInstanceLifecycle(next);
 
   if (
-    next.ec2State !== instance.ec2State ||
-    next.publicIp !== instance.publicIp ||
-    next.privateIp !== instance.privateIp ||
-    next.startedAt !== instance.startedAt ||
-    next.status !== instance.status
+    normalizedNext.ec2State !== instance.ec2State ||
+    normalizedNext.publicIp !== instance.publicIp ||
+    normalizedNext.privateIp !== instance.privateIp ||
+    normalizedNext.startedAt !== instance.startedAt ||
+    normalizedNext.status !== instance.status
   ) {
-    await instanceRepository.put(next);
+    await instanceRepository.put(normalizedNext);
   }
 
-  return next;
+  return normalizedNext;
 }
 
 async function createOperation(
@@ -1956,6 +2089,93 @@ export function createRouter(): Router {
       };
       await worldPresetsRepository.put(world);
       res.status(201).json({ world });
+    }),
+  );
+
+  router.post(
+    "/v1/games/:gameId/worlds/:worldId/copy",
+    withAsync(async (req, res) => {
+      const authReq = req as AuthenticatedRequest;
+      const gameId = routeParam(req.params.gameId);
+      const worldId = routeParam(req.params.worldId);
+      const body = req.body as CopyWorldRequest;
+      const sourceWorld = await worldPresetsRepository.get(worldPk(gameId, worldId));
+      if (!sourceWorld || !isGameWorldForGame(sourceWorld, gameId)) {
+        res.status(404).json({ error: "world not found" });
+        return;
+      }
+
+      const now = new Date().toISOString();
+      const nextWorldId = randomUUID();
+      const sourceLocation = await resolveWorldConfigLocation(gameId, sourceWorld);
+      const targetPrefix = siblingWorldPrefix(sourceLocation.worldPrefix, gameId, nextWorldId);
+      const copiedObjectCount = await copyS3Prefix(
+        sourceLocation.bucket,
+        sourceLocation.worldPrefix,
+        targetPrefix,
+      );
+
+      const world: WorldPresetItem = {
+        ...sourceWorld,
+        pk: worldPk(gameId, nextWorldId),
+        gameId,
+        gameRefId: gameId,
+        kind: "game-world",
+        worldId: nextWorldId,
+        name:
+          typeof body?.name === "string" && body.name.trim()
+            ? body.name.trim()
+            : `Copy of ${sourceWorld.name}`,
+        description:
+          typeof body?.description === "string"
+            ? body.description.trim() || undefined
+            : sourceWorld.description,
+        worldPrefix: targetPrefix,
+        currentInstanceId: undefined,
+        currentInstanceGameId: undefined,
+        lockedAt: undefined,
+        createdAt: now,
+        updatedAt: now,
+        createdBy: authReq.user.sub,
+      };
+      await worldPresetsRepository.put(world);
+      res.status(201).json({ world, copiedObjectCount });
+    }),
+  );
+
+  router.delete(
+    "/v1/games/:gameId/worlds/:worldId",
+    withAsync(async (req, res) => {
+      const gameId = routeParam(req.params.gameId);
+      const worldId = routeParam(req.params.worldId);
+      const world = await worldPresetsRepository.get(worldPk(gameId, worldId));
+      if (!world || !isGameWorldForGame(world, gameId)) {
+        res.status(404).json({ error: "world not found" });
+        return;
+      }
+
+      const matchingInstances = (await instanceRepository.scanByField("selectedWorldId", worldId))
+        .filter((instance) => instance.gameId === gameId);
+      let activeInstance = matchingInstances.find((instance) => {
+        return !isTerminalInstanceState(instanceStateText(instance));
+      });
+      if (!activeInstance && world.currentInstanceId) {
+        const lockedInstance = await instanceRepository.get(world.currentInstanceId);
+        if (lockedInstance) {
+          if (!isTerminalInstanceState(instanceStateText(lockedInstance))) {
+            activeInstance = lockedInstance;
+          }
+        }
+      }
+      if (activeInstance) {
+        res.status(409).json({ error: "world has an active or locked server" });
+        return;
+      }
+
+      const location = await resolveWorldConfigLocation(gameId, world);
+      const deletedObjectCount = await deleteS3Prefix(location.bucket, location.worldPrefix);
+      await worldPresetsRepository.delete(worldPk(gameId, worldId));
+      res.json({ deleted: true, deletedObjectCount });
     }),
   );
 

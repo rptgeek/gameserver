@@ -267,6 +267,34 @@ export async function createWorld(gameId: string, payload: {
     : ('world' in result ? (result.world as WorldPreset) : (result as WorldPreset));
 }
 
+export async function copyWorld(gameId: string, worldId: string, payload: {
+  name?: string;
+  description?: string;
+} = {}): Promise<WorldPreset> {
+  const result = await request<{ world?: WorldPreset } | WorldPreset>(
+    `/v1/games/${encodeURIComponent(gameId)}/worlds/${encodeURIComponent(worldId)}/copy`,
+    {
+      method: 'POST',
+      body: payload,
+    },
+  );
+  if (!result || typeof result !== 'object') {
+    throw new Error('Invalid world copy response');
+  }
+  return Array.isArray(result)
+    ? result[0]
+    : ('world' in result ? (result.world as WorldPreset) : (result as WorldPreset));
+}
+
+export async function deleteWorld(gameId: string, worldId: string): Promise<void> {
+  await request(
+    `/v1/games/${encodeURIComponent(gameId)}/worlds/${encodeURIComponent(worldId)}`,
+    {
+      method: 'DELETE',
+    },
+  );
+}
+
 export async function getWorldServerConfig(gameId: string, worldId: string): Promise<WorldServerConfig> {
   return request<WorldServerConfig>(
     `/v1/games/${encodeURIComponent(gameId)}/worlds/${encodeURIComponent(worldId)}/server-config`,

@@ -1,0 +1,29 @@
+{
+  "name": "7d2d",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.1"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "frontend:build": "npm run build --prefix frontend",
+    "frontend:deploy": "bash scripts/deploy-frontend.sh",
+    "frontend:release": "npm run frontend:deploy"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rptgeek/gameserver.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/rptgeek/gameserver/issues"
+  },
+  "homepage": "https://github.com/rptgeek/gameserver#readme"
+}

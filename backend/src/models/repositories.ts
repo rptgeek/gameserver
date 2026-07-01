@@ -1,5 +1,5 @@
 import { ConditionalCheckFailedException } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, GetCommand, PutCommand, ScanCommand } from "@aws-sdk/lib-dynamodb";
+import { DynamoDBDocumentClient, DeleteCommand, GetCommand, PutCommand, ScanCommand } from "@aws-sdk/lib-dynamodb";
 
 export class BaseRepository<T extends { pk: string }> {
   constructor(
@@ -19,6 +19,15 @@ export class BaseRepository<T extends { pk: string }> {
 
   async put(item: T): Promise<void> {
     await this.ddb.send(new PutCommand({ TableName: this.tableName, Item: item }));
+  }
+
+  async delete(pk: string): Promise<void> {
+    await this.ddb.send(
+      new DeleteCommand({
+        TableName: this.tableName,
+        Key: { pk },
+      }),
+    );
   }
 
   async putIfNotExists(item: T): Promise<boolean> {

@@ -7,9 +7,11 @@ import {
   signOut,
 } from './auth';
 import {
+  copyWorld,
   createInstance,
   createProfile,
   createWorld,
+  deleteWorld,
   getConfig,
   getInstance,
   getLogs,
@@ -201,6 +203,7 @@ export default function App() {
   const [worldName, setWorldPresetName] = useState('');
   const [worldDescription, setWorldDescription] = useState('');
   const [worldSeedText, setWorldSeedText] = useState('{\n  "seed": ""\n}');
+  const [busyWorldIds, setBusyWorldIds] = useState<Record<string, 'copying' | 'deleting'>>({});
   const [serverConfigXml, setServerConfigXml] = useState('');
   const [serverConfigKey, setServerConfigKey] = useState('');
   const [serverConfigLoading, setServerConfigLoading] = useState(false);
@@ -856,6 +859,84 @@ export default function App() {
     }
   };
 
+  const setWorldBusy = (world: WorldPreset, value?: 'copying' | 'deleting') => {
+    const key = `${worldGameId(world)}:${world.worldId}`;
+    setBusyWorldIds((current) => {
+      const next = { ...current };
+      if (value) {
+        next[key] = value;
+      } else {
+        delete next[key];
+      }
+      return next;
+    });
+  };
+
+  const worldBusyState = (world: WorldPreset): 'copying' | 'deleting' | undefined => {
+    return busyWorldIds[`${worldGameId(world)}:${world.worldId}`];
+  };
+
+  const handleCopyWorld = async (world: WorldPreset) => {
+    const gameId = worldGameId(world);
+    if (!gameId || !world.worldId) {
+      notify('error', 'World is missing a game id or world id');
+      return;
+    }
+    const name = window.prompt('Name for the copied world', `Copy of ${world.name}`);
+    if (name === null) {
+      return;
+    }
+    if (!name.trim()) {
+      notify('error', 'World name is required');
+      return;
+    }
+
+    setWorldBusy(world, 'copying');
+    try {
+      const copied = await copyWorld(gameId, world.worldId, { name: name.trim() });
+      setWorlds((current) => [copied, ...current]);
+      notify('success', `Copied ${world.name}`);
+    } catch (error) {
+      notify('error', error instanceof Error ? error.message : 'Unable to copy world');
+    } finally {
+      setWorldBusy(world);
+    }
+  };
+
+  const handleDeleteWorld = async (world: WorldPreset, active: boolean) => {
+    const gameId = worldGameId(world);
+    if (!gameId || !world.worldId) {
+      notify('error', 'World is missing a game id or world id');
+      return;
+    }
+    if (active) {
+      notify('error', 'Stop the running server before deleting this world');
+      return;
+    }
+    const confirmed = window.confirm(
+      `Delete ${world.name}? This removes the saved world record and S3 save data for this world.`,
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setWorldBusy(world, 'deleting');
+    try {
+      await deleteWorld(gameId, world.worldId);
+      setWorlds((current) => current.filter((item) => item.worldId !== world.worldId || worldGameId(item) !== gameId));
+      setAddForm((current) =>
+        current.gameId === gameId && current.selectedWorldId === world.worldId
+          ? { ...current, selectedWorldId: '', worldName: '' }
+          : current,
+      );
+      notify('success', `Deleted ${world.name}`);
+    } catch (error) {
+      notify('error', error instanceof Error ? error.message : 'Unable to delete world');
+    } finally {
+      setWorldBusy(world);
+    }
+  };
+
   const handleSignOut = async () => {
     try {
       await signOut();
@@ -1021,6 +1102,7 @@ export default function App() {
                     const runtime = worldRuntimeState(world);
                     const active = runtime.status !== 'offline';
                     const status = runtime.instance ? playerStatuses[instanceId(runtime.instance)] : undefined;
+                    const busy = worldBusyState(world);
                     return (
                       <article className="world-card" key={world.worldId}>
                         <div className="world-card-head">
@@ -1067,6 +1149,22 @@ export default function App() {
                               {active ? 'View running server' : 'View last launch'}
                             </button>
                           )}
+                          <button
+                            type="button"
+                            className="btn btn-small"
+                            disabled={Boolean(busy)}
+                            onClick={() => handleCopyWorld(world)}
+                          >
+                            {busy === 'copying' ? 'Copying...' : 'Copy'}
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn-small btn-danger"
+                            disabled={active || Boolean(busy)}
+                            onClick={() => handleDeleteWorld(world, active)}
+                          >
+                            {busy === 'deleting' ? 'Deleting...' : 'Delete'}
+                          </button>
                         </div>
                       </article>
                     );
