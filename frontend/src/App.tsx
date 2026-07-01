@@ -17,6 +17,7 @@ import {
   getLogs,
   getOperation,
   getPlayerStatus,
+  getWorldRuntimeInfo,
   getWorldServerConfig,
   listProfiles,
   listWorlds,
@@ -44,6 +45,7 @@ import type {
   ServerInstance,
   ToastType,
   WorldPreset,
+  WorldRuntimeInfo,
 } from './types';
 
 type DetailTab = 'overview' | 'bootstrap-logs' | 'server-logs' | 'console' | 'config';
@@ -120,6 +122,14 @@ function instanceType(instance: ServerInstance): string {
 
 function worldGameId(world: WorldPreset): string {
   return world.gameId || String(world.gameRefId || '');
+}
+
+function worldKey(world: WorldPreset): string {
+  return `${worldGameId(world)}:${world.worldId}`;
+}
+
+function supportsServerConfig(gameId: string): boolean {
+  return gameId.toLowerCase() === '7d2d';
 }
 
 function worldS3Prefix(world: WorldPreset): string {
@@ -204,6 +214,7 @@ export default function App() {
   const [worldDescription, setWorldDescription] = useState('');
   const [worldSeedText, setWorldSeedText] = useState('{\n  "seed": ""\n}');
   const [busyWorldIds, setBusyWorldIds] = useState<Record<string, 'copying' | 'deleting'>>({});
+  const [worldRuntimeInfo, setWorldRuntimeInfo] = useState<Record<string, WorldRuntimeInfo>>({});
   const [serverConfigXml, setServerConfigXml] = useState('');
   const [serverConfigKey, setServerConfigKey] = useState('');
   const [serverConfigLoading, setServerConfigLoading] = useState(false);
@@ -252,6 +263,29 @@ export default function App() {
       ]);
       setProfiles(loadedProfiles);
       setWorlds(loadedWorlds);
+      const runtimeEntries = await Promise.all(
+        loadedWorlds
+          .filter((world) => worldGameId(world).toLowerCase() === 'windrose')
+          .map(async (world) => {
+            try {
+              const info = await getWorldRuntimeInfo(worldGameId(world), world.worldId);
+              return [worldKey(world), info] as const;
+            } catch {
+              return [worldKey(world), null] as const;
+            }
+          }),
+      );
+      setWorldRuntimeInfo((current) => {
+        const next = { ...current };
+        for (const [key, info] of runtimeEntries) {
+          if (info) {
+            next[key] = info;
+          } else {
+            delete next[key];
+          }
+        }
+        return next;
+      });
     } catch (error) {
       notify('error', error instanceof Error ? error.message : 'Unable to load presets');
       setProfiles([]);
@@ -598,7 +632,7 @@ export default function App() {
     }
     try {
       const gameId = instanceGameId(selectedInstance);
-      if (gameId && selectedInstance.selectedWorldId) {
+      if (gameId && selectedInstance.selectedWorldId && supportsServerConfig(gameId)) {
         setServerConfigSaving(true);
         setConfigError('');
         const saved = await saveWorldServerConfig(gameId, selectedInstance.selectedWorldId, serverConfigXml);
@@ -676,7 +710,7 @@ export default function App() {
   };
 
   const loadWorldServerConfig = async (gameId: string, worldId: string) => {
-    if (!gameId || !worldId) {
+    if (!gameId || !worldId || !supportsServerConfig(gameId)) {
       setServerConfigXml('');
       setServerConfigKey('');
       return;
@@ -735,7 +769,7 @@ export default function App() {
       return;
     }
     try {
-      if (addForm.selectedWorldId) {
+      if (addForm.selectedWorldId && supportsServerConfig(addForm.gameId)) {
         setServerConfigSaving(true);
         await saveWorldServerConfig(addForm.gameId, addForm.selectedWorldId, serverConfigXml);
       }
@@ -860,7 +894,7 @@ export default function App() {
   };
 
   const setWorldBusy = (world: WorldPreset, value?: 'copying' | 'deleting') => {
-    const key = `${worldGameId(world)}:${world.worldId}`;
+    const key = worldKey(world);
     setBusyWorldIds((current) => {
       const next = { ...current };
       if (value) {
@@ -873,7 +907,7 @@ export default function App() {
   };
 
   const worldBusyState = (world: WorldPreset): 'copying' | 'deleting' | undefined => {
-    return busyWorldIds[`${worldGameId(world)}:${world.worldId}`];
+    return busyWorldIds[worldKey(world)];
   };
 
   const handleCopyWorld = async (world: WorldPreset) => {
@@ -934,6 +968,15 @@ export default function App() {
       notify('error', error instanceof Error ? error.message : 'Unable to delete world');
     } finally {
       setWorldBusy(world);
+    }
+  };
+
+  const handleCopyInviteCode = async (inviteCode: string) => {
+    try {
+      await navigator.clipboard.writeText(inviteCode);
+      notify('success', 'Invite code copied');
+    } catch {
+      notify('error', 'Unable to copy invite code');
     }
   };
 
@@ -1103,6 +1146,8 @@ export default function App() {
                     const active = runtime.status !== 'offline';
                     const status = runtime.instance ? playerStatuses[instanceId(runtime.instance)] : undefined;
                     const busy = worldBusyState(world);
+                    const runtimeInfo = worldRuntimeInfo[worldKey(world)];
+                    const inviteCode = runtimeInfo?.inviteCode;
                     return (
                       <article className="world-card" key={world.worldId}>
                         <div className="world-card-head">
@@ -1127,6 +1172,12 @@ export default function App() {
                           <strong>{status?.serverVersion || '—'}</strong>
                           <span>Player check</span>
                           <strong>{prettyDate(status?.lastUpdatedAt)}</strong>
+                          {worldGameId(world).toLowerCase() === 'windrose' && (
+                            <>
+                              <span>Invite code</span>
+                              <strong>{inviteCode || 'Available after first backup'}</strong>
+                            </>
+                          )}
                         </div>
                         <div className="row-actions">
                           <button
@@ -1157,6 +1208,15 @@ export default function App() {
                           >
                             {busy === 'copying' ? 'Copying...' : 'Copy'}
                           </button>
+                          {inviteCode && (
+                            <button
+                              type="button"
+                              className="btn btn-small"
+                              onClick={() => handleCopyInviteCode(inviteCode)}
+                            >
+                              Copy invite
+                            </button>
+                          )}
                           <button
                             type="button"
                             className="btn btn-small btn-danger"
@@ -1531,7 +1591,7 @@ export default function App() {
 
                 {detailTab === 'config' && (
                   <div className="config-panel">
-                    {instanceGameId(selectedInstance) && selectedInstance.selectedWorldId ? (
+                    {instanceGameId(selectedInstance) && selectedInstance.selectedWorldId && supportsServerConfig(instanceGameId(selectedInstance)) ? (
                       <>
                         <p className="field-hint">
                           Editing S3 serverconfig.xml for world {selectedInstance.worldName || selectedInstance.selectedWorldId}.
@@ -1570,7 +1630,7 @@ export default function App() {
                         disabled={configSaving || serverConfigSaving || serverConfigLoading}
                         onClick={handleSaveConfig}
                       >
-                        {instanceGameId(selectedInstance) && selectedInstance.selectedWorldId ? 'Save serverconfig.xml' : 'Save config'}
+                        {instanceGameId(selectedInstance) && selectedInstance.selectedWorldId && supportsServerConfig(instanceGameId(selectedInstance)) ? 'Save serverconfig.xml' : 'Save config'}
                       </button>
                     </div>
                   </div>
@@ -1733,18 +1793,20 @@ export default function App() {
                 Save as world
               </button>
             </div>
-            <label>
-              serverconfig.xml
-              {serverConfigKey && <small className="field-hint">S3: {serverConfigKey}</small>}
-              <textarea
-                rows={18}
-                value={serverConfigLoading ? 'Loading serverconfig.xml…' : serverConfigXml}
-                onChange={(event) => setServerConfigXml(event.target.value)}
-                disabled={serverConfigLoading}
-                spellCheck={false}
-                className="xml-editor"
-              />
-            </label>
+            {supportsServerConfig(addForm.gameId) && (
+              <label>
+                serverconfig.xml
+                {serverConfigKey && <small className="field-hint">S3: {serverConfigKey}</small>}
+                <textarea
+                  rows={18}
+                  value={serverConfigLoading ? 'Loading serverconfig.xml…' : serverConfigXml}
+                  onChange={(event) => setServerConfigXml(event.target.value)}
+                  disabled={serverConfigLoading}
+                  spellCheck={false}
+                  className="xml-editor"
+                />
+              </label>
+            )}
             <div className="modal-actions">
               <button type="button" className="btn btn-small" onClick={() => setShowAddInstance(false)}>
                 Cancel
@@ -1755,7 +1817,7 @@ export default function App() {
                 onClick={handleCreateInstance}
                 disabled={serverConfigLoading || serverConfigSaving}
               >
-                {serverConfigSaving ? 'Saving config…' : 'Save config & launch'}
+                {serverConfigSaving ? 'Saving config…' : supportsServerConfig(addForm.gameId) ? 'Save config & launch' : 'Launch'}
               </button>
             </div>
           </div>

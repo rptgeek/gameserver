@@ -186,6 +186,7 @@ def main() -> None:
     backup_interval = parse_int(env.get("BACKUP_INTERVAL_MINUTES", "5"), fallback=5)
     stop_timeout = parse_int(env.get("STOP_TIMEOUT_SECONDS", "30"), fallback=30)
     volume_size = parse_int(env.get("VOLUME_SIZE_GIB", ""), fallback=0)
+    manages_game_config = game_id == "7d2d" or safe_str(env.get("MANAGE_GAME_CONFIG")) == "1"
 
     profile_item = make_item(
       {
@@ -222,9 +223,12 @@ def main() -> None:
         "gameStateDirPath": safe_str(env.get("STATE_DIR_PATH"), fallback=f"/srv/{game_id}-state"),
         "gameConfigS3Key": safe_str(
           env.get("GAMECONFIG_S3_KEY"),
-          fallback=f"{safe_str(env.get('S3_PREFIX'), fallback='servers')}/{game_id}/config/serverconfig.xml",
+          fallback=f"{safe_str(env.get('S3_PREFIX'), fallback='servers')}/{game_id}/config/serverconfig.xml" if manages_game_config else "",
         ),
-        "gameConfigLocalPath": safe_str(env.get("GAMECONFIG_LOCAL_PATH"), fallback=f"/opt/{game_id}/serverconfig.xml"),
+        "gameConfigLocalPath": safe_str(
+          env.get("GAMECONFIG_LOCAL_PATH"),
+          fallback=f"/opt/{game_id}/serverconfig.xml" if manages_game_config else "",
+        ),
         "ensureSecurityGroupRules": safe_str(env.get("ENSURE_PROFILE_SECURITY_GROUP_RULES"), fallback="") == "1",
         "createdAt": now,
         "updatedAt": now,
@@ -256,6 +260,10 @@ def main() -> None:
       del profile_item["tcpPorts"]
     if not volume_size:
       profile_item.pop("volumeSizeGiB", None)
+    if profile_item["gameConfigS3Key"]["S"] == "":
+      del profile_item["gameConfigS3Key"]
+    if profile_item["gameConfigLocalPath"]["S"] == "":
+      del profile_item["gameConfigLocalPath"]
 
     try:
       ddb.put_item(

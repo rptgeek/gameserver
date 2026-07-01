@@ -458,6 +458,7 @@ async function resolveSpotLaunchChoice(
 
 function renderBootstrapTemplate(profile: GameProfileItem, worldPrefix: string, gameId: string): string {
   let template = bootstrapTemplate();
+  const manageServerConfig = supportsManagedServerConfig(profile, gameId);
   const replacements: Record<string, string> = {
     WORLD_BUCKET: shellSingleQuote(profile.worldBucket || ""),
     WORLD_BUCKET_REGION: shellSingleQuote(profile.worldBucketRegion || config.awsRegion),
@@ -468,8 +469,8 @@ function renderBootstrapTemplate(profile: GameProfileItem, worldPrefix: string, 
     STATE_DIR_PATH: shellSingleQuote(profile.gameStateDirPath || `/srv/${(profile.gameName || gameId)}-state`),
     STATE_LINK: shellSingleQuote(profile.stateLink || ""),
     SERVICE_USER: shellSingleQuote(profile.profileEnv?.SERVICE_USER || "auto"),
-    GAMECONFIG_S3_KEY: shellSingleQuote(profile.gameConfigS3Key || `${worldPrefix}/config/serverconfig.xml`),
-    GAMECONFIG_LOCAL_PATH: shellSingleQuote(profile.gameConfigLocalPath || `/opt/${profile.gameName || gameId}/serverconfig.xml`),
+    GAMECONFIG_S3_KEY: shellSingleQuote(manageServerConfig ? profile.gameConfigS3Key || `${worldPrefix}/config/serverconfig.xml` : ""),
+    GAMECONFIG_LOCAL_PATH: shellSingleQuote(manageServerConfig ? profile.gameConfigLocalPath || `/opt/${profile.gameName || gameId}/serverconfig.xml` : ""),
     BACKUP_INTERVAL_MINUTES: String(asPositiveInt(profile.backupIntervalMinutes, 5)),
     BACKUP_BOOT_OFFSET_MINUTES: String(asPositiveInt(profile.backupIntervalMinutes, 5)),
     STOP_TIMEOUT_SECONDS: String(asPositiveInt(profile.stopTimeoutSeconds, 30)),
@@ -600,6 +601,11 @@ function worldConfigKey(worldPrefix: string): string {
   return `${worldPrefix.replace(/\/+$/, "")}/config/serverconfig.xml`;
 }
 
+function supportsManagedServerConfig(profile: GameProfileItem, gameId: string): boolean {
+  const gameName = (profile.gameName || gameId).toLowerCase();
+  return gameName === "7d2d" || profile.profileEnv?.MANAGE_GAME_CONFIG === "1";
+}
+
 function worldPrefixRoot(worldPrefix: string): string {
   return `${worldPrefix.replace(/\/+$/, "")}/`;
 }
@@ -704,6 +710,21 @@ async function getS3ObjectText(bucket: string, key: string): Promise<string | un
     }
     throw error;
   }
+}
+
+function parseJsonObject(text: string | undefined): Record<string, unknown> | undefined {
+  if (!text) return undefined;
+  try {
+    const parsed = JSON.parse(text);
+    return isObject(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function textField(record: Record<string, unknown> | undefined, key: string): string | undefined {
+  const value = record?.[key];
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
 function copySourceFor(bucket: string, key: string): string {
@@ -2176,6 +2197,66 @@ export function createRouter(): Router {
       const deletedObjectCount = await deleteS3Prefix(location.bucket, location.worldPrefix);
       await worldPresetsRepository.delete(worldPk(gameId, worldId));
       res.json({ deleted: true, deletedObjectCount });
+    }),
+  );
+
+  router.get(
+    "/v1/games/:gameId/worlds/:worldId/runtime-info",
+    withAsync(async (req, res) => {
+      const gameId = routeParam(req.params.gameId);
+      const worldId = routeParam(req.params.worldId);
+      const world = await worldPresetsRepository.get(worldPk(gameId, worldId));
+      if (!world || !isGameWorldForGame(world, gameId)) {
+        res.status(404).json({ error: "world not found" });
+        return;
+      }
+
+      const location = await resolveWorldConfigLocation(gameId, world);
+      const stateRoot = `${location.worldPrefix.replace(/\/+$/, "")}/state`;
+      const serverDescriptionKeys = [
+        `${stateRoot}/ServerDescription.json`,
+        `${stateRoot}/R5/ServerDescription.json`,
+      ];
+      const worldDescriptionKeys = [
+        `${stateRoot}/WorldDescription.json`,
+        `${stateRoot}/R5/WorldDescription.json`,
+      ];
+
+      let serverDescription: Record<string, unknown> | undefined;
+      let serverDescriptionKey: string | undefined;
+      for (const key of serverDescriptionKeys) {
+        serverDescription = parseJsonObject(await getS3ObjectText(location.bucket, key));
+        if (serverDescription) {
+          serverDescriptionKey = key;
+          break;
+        }
+      }
+
+      let worldDescription: Record<string, unknown> | undefined;
+      let worldDescriptionKey: string | undefined;
+      for (const key of worldDescriptionKeys) {
+        worldDescription = parseJsonObject(await getS3ObjectText(location.bucket, key));
+        if (worldDescription) {
+          worldDescriptionKey = key;
+          break;
+        }
+      }
+
+      res.json({
+        bucket: location.bucket,
+        worldPrefix: location.worldPrefix,
+        inviteCode:
+          textField(serverDescription, "InviteCode") ||
+          textField(serverDescription, "inviteCode"),
+        serverName:
+          textField(serverDescription, "Name") ||
+          textField(serverDescription, "ServerName") ||
+          textField(serverDescription, "name"),
+        serverDescriptionKey,
+        worldDescriptionKey,
+        serverDescription,
+        worldDescription,
+      });
     }),
   );
 

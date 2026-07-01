@@ -398,11 +398,13 @@ runtime_user="${USER:-$(whoami)}"
 export USER="${runtime_user}"
 export HOME="${HOME:-$(getent passwd "${runtime_user}" | cut -d: -f6 || true)}"
 
-mkdir -p "$(dirname "${GAMECONFIG_LOCAL_PATH}")"
-if [[ -n "${WORLD_BUCKET}" && -n "${GAMECONFIG_S3_KEY}" ]]; then
+if [[ -n "${GAMECONFIG_LOCAL_PATH}" ]]; then
+  mkdir -p "$(dirname "${GAMECONFIG_LOCAL_PATH}")"
+fi
+if [[ -n "${WORLD_BUCKET}" && -n "${GAMECONFIG_S3_KEY}" && -n "${GAMECONFIG_LOCAL_PATH}" ]]; then
   aws s3 cp "s3://${WORLD_BUCKET}/${GAMECONFIG_S3_KEY}" "${GAMECONFIG_LOCAL_PATH}" || true
 fi
-if [[ ! -f "${GAMECONFIG_LOCAL_PATH}" ]]; then
+if [[ -n "${GAMECONFIG_LOCAL_PATH}" && ! -f "${GAMECONFIG_LOCAL_PATH}" ]]; then
   cat <<XML > "${GAMECONFIG_LOCAL_PATH}"
 <ServerSettings>
   <!-- Server representation -->

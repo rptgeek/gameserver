@@ -8,6 +8,7 @@ import type {
   OperationResult,
   PlayerStatus,
   ServerInstance,
+  WorldRuntimeInfo,
   WorldServerConfig,
   WorldPreset,
 } from './types';
@@ -292,6 +293,12 @@ export async function deleteWorld(gameId: string, worldId: string): Promise<void
     {
       method: 'DELETE',
     },
+  );
+}
+
+export async function getWorldRuntimeInfo(gameId: string, worldId: string): Promise<WorldRuntimeInfo> {
+  return request<WorldRuntimeInfo>(
+    `/v1/games/${encodeURIComponent(gameId)}/worlds/${encodeURIComponent(worldId)}/runtime-info`,
   );
 }
 

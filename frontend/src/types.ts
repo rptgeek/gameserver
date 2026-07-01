@@ -45,6 +45,17 @@ export interface WorldServerConfig {
   configXml: string;
 }
 
+export interface WorldRuntimeInfo {
+  bucket: string;
+  worldPrefix?: string;
+  inviteCode?: string;
+  serverName?: string;
+  serverDescriptionKey?: string;
+  worldDescriptionKey?: string;
+  serverDescription?: Record<string, unknown>;
+  worldDescription?: Record<string, unknown>;
+}
+
 export interface PlayerStatus {
   instanceId: string;
   playerCount: number;
