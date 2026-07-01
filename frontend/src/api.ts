@@ -302,6 +302,21 @@ export async function getWorldRuntimeInfo(gameId: string, worldId: string): Prom
   );
 }
 
+export async function saveWorldRuntimeInfo(gameId: string, worldId: string, payload: {
+  serverDescription?: Record<string, unknown>;
+  worldDescription?: Record<string, unknown>;
+  serverDescriptionKey?: string;
+  worldDescriptionKey?: string;
+}): Promise<WorldRuntimeInfo & { writtenKeys?: string[] }> {
+  return request<WorldRuntimeInfo & { writtenKeys?: string[] }>(
+    `/v1/games/${encodeURIComponent(gameId)}/worlds/${encodeURIComponent(worldId)}/runtime-info`,
+    {
+      method: 'PUT',
+      body: payload,
+    },
+  );
+}
+
 export async function getWorldServerConfig(gameId: string, worldId: string): Promise<WorldServerConfig> {
   return request<WorldServerConfig>(
     `/v1/games/${encodeURIComponent(gameId)}/worlds/${encodeURIComponent(worldId)}/server-config`,

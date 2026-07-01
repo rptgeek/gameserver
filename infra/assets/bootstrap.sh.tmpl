@@ -283,6 +283,7 @@ set -euo pipefail
 WORLD_BUCKET='{{WORLD_BUCKET}}'
 WORLD_PREFIX='{{WORLD_PREFIX}}'
 STATE_DIR_PATH='{{STATE_DIR_PATH}}'
+GAME_SERVICE='{{GAME_SERVICE}}'
 GAMECONFIG_LOCAL_PATH='{{GAMECONFIG_LOCAL_PATH}}'
 GAMECONFIG_S3_KEY='{{GAMECONFIG_S3_KEY}}'
 if [[ -n "${WORLD_BUCKET}" ]] && [[ -n "${WORLD_PREFIX}" ]]; then
@@ -290,6 +291,18 @@ if [[ -n "${WORLD_BUCKET}" ]] && [[ -n "${WORLD_PREFIX}" ]]; then
 fi
 if [[ -n "${GAMECONFIG_LOCAL_PATH}" ]] && [[ -n "${GAMECONFIG_S3_KEY}" ]] && [[ -f "${GAMECONFIG_LOCAL_PATH}" ]]; then
   aws s3 cp "${GAMECONFIG_LOCAL_PATH}" "s3://${WORLD_BUCKET}/${GAMECONFIG_S3_KEY}" || true
+fi
+if [[ "${GAME_SERVICE}" == "windrose" ]] && [[ -n "${WORLD_BUCKET}" ]] && [[ -n "${WORLD_PREFIX}" ]]; then
+  server_description="${STATE_DIR_PATH}/ServerDescription.json"
+  world_description="$(find "${STATE_DIR_PATH}" -type f -name WorldDescription.json 2>/dev/null | head -n 1 || true)"
+  if [[ -f "${server_description}" ]]; then
+    echo "Windrose ServerDescription.json: ${server_description}"
+    aws s3 cp "${server_description}" "s3://${WORLD_BUCKET}/${WORLD_PREFIX}/config/windrose/ServerDescription.json" || true
+  fi
+  if [[ -n "${world_description}" ]] && [[ -f "${world_description}" ]]; then
+    echo "Windrose WorldDescription.json: ${world_description}"
+    aws s3 cp "${world_description}" "s3://${WORLD_BUCKET}/${WORLD_PREFIX}/config/windrose/WorldDescription.json" || true
+  fi
 fi
 EOS
 

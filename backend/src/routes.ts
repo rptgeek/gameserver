@@ -543,17 +543,44 @@ function logStreamNameFor(instanceId: string, source: "bootstrap" | "server"): s
   return `${instanceId}-${source}`;
 }
 
+function windrosePlayerName(message: string): string | undefined {
+  const quoted =
+    message.match(/(?:player|user|client)\s+['"]([^'"]+)['"]\s+(?:has\s+)?(?:connected|disconnected|logged\s+(?:in|out))/i) ||
+    message.match(/['"]([^'"]+)['"]\s+(?:has\s+)?(?:connected|disconnected|logged\s+(?:in|out))/i);
+  if (quoted?.[1]) return quoted[1].trim();
+
+  const labeled = message.match(
+    /(?:player|user|client)[\s:=]+([A-Za-z0-9_. -]{1,64})\s+(?:has\s+)?(?:connected|disconnected|logged\s+(?:in|out))/i,
+  );
+  return labeled?.[1]?.trim();
+}
+
 function parseLatestPlayerStatus(events: Array<{ timestamp?: number; message?: string }>) {
   let playerCount: number | undefined;
   let lastUpdatedAt: string | undefined;
   let serverVersion: string | undefined;
   const players = new Set<string>();
+  const windrosePlayers = new Set<string>();
 
   for (const event of events) {
     const message = event.message ?? "";
     const joined = message.match(/GMSG: Player '([^']+)' joined the game/);
     if (joined?.[1]) {
       players.add(joined[1]);
+    }
+
+    if (/\b(?:connected|login|logged in)\b/i.test(message)) {
+      const playerName = windrosePlayerName(message);
+      if (playerName) {
+        windrosePlayers.add(playerName);
+        lastUpdatedAt = event.timestamp ? new Date(event.timestamp).toISOString() : lastUpdatedAt;
+      }
+    } else if (/\b(?:disconnected|logout|logged out)\b/i.test(message)) {
+      const playerName = windrosePlayerName(message);
+      if (playerName) {
+        windrosePlayers.delete(playerName);
+        lastUpdatedAt = event.timestamp ? new Date(event.timestamp).toISOString() : lastUpdatedAt;
+      }
     }
   }
 
@@ -572,8 +599,8 @@ function parseLatestPlayerStatus(events: Array<{ timestamp?: number; message?: s
   }
 
   return {
-    playerCount: playerCount ?? 0,
-    players: Array.from(players),
+    playerCount: playerCount ?? windrosePlayers.size,
+    players: Array.from(players.size > 0 ? players : windrosePlayers),
     lastUpdatedAt,
     serverVersion,
   };
@@ -599,6 +626,18 @@ function siblingWorldPrefix(sourcePrefix: string, gameId: string, worldId: strin
 
 function worldConfigKey(worldPrefix: string): string {
   return `${worldPrefix.replace(/\/+$/, "")}/config/serverconfig.xml`;
+}
+
+function windroseConfigRoot(worldPrefix: string): string {
+  return `${worldPrefix.replace(/\/+$/, "")}/config/windrose`;
+}
+
+function windroseStableServerDescriptionKey(worldPrefix: string): string {
+  return `${windroseConfigRoot(worldPrefix)}/ServerDescription.json`;
+}
+
+function windroseStableWorldDescriptionKey(worldPrefix: string): string {
+  return `${windroseConfigRoot(worldPrefix)}/WorldDescription.json`;
 }
 
 function supportsManagedServerConfig(profile: GameProfileItem, gameId: string): boolean {
@@ -725,6 +764,26 @@ function parseJsonObject(text: string | undefined): Record<string, unknown> | un
 function textField(record: Record<string, unknown> | undefined, key: string): string | undefined {
   const value = record?.[key];
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function numberField(record: Record<string, unknown> | undefined, key: string): number | undefined {
+  const value = record?.[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function booleanField(record: Record<string, unknown> | undefined, key: string): boolean | undefined {
+  const value = record?.[key];
+  return typeof value === "boolean" ? value : undefined;
+}
+
+function isSafeWorldJsonKey(key: unknown, worldPrefix: string, basename: string): key is string {
+  if (typeof key !== "string" || !key.trim()) return false;
+  const normalizedKey = key.replace(/^\/+/, "");
+  const normalizedPrefix = worldPrefixRoot(worldPrefix);
+  return (
+    normalizedKey === `${worldPrefix.replace(/\/+$/, "")}/${basename}` ||
+    (normalizedKey.startsWith(normalizedPrefix) && normalizedKey.endsWith(`/${basename}`))
+  );
 }
 
 function copySourceFor(bucket: string, key: string): string {
@@ -2213,11 +2272,14 @@ export function createRouter(): Router {
 
       const location = await resolveWorldConfigLocation(gameId, world);
       const stateRoot = `${location.worldPrefix.replace(/\/+$/, "")}/state`;
+      const configRoot = `${location.worldPrefix.replace(/\/+$/, "")}/config/windrose`;
       const serverDescriptionKeys = [
+        `${configRoot}/ServerDescription.json`,
         `${stateRoot}/ServerDescription.json`,
         `${stateRoot}/R5/ServerDescription.json`,
       ];
       const worldDescriptionKeys = [
+        `${configRoot}/WorldDescription.json`,
         `${stateRoot}/WorldDescription.json`,
         `${stateRoot}/R5/WorldDescription.json`,
       ];
@@ -2234,11 +2296,31 @@ export function createRouter(): Router {
 
       let worldDescription: Record<string, unknown> | undefined;
       let worldDescriptionKey: string | undefined;
-      for (const key of worldDescriptionKeys) {
+      const worldIslandId = textField(serverDescription, "WorldIslandId");
+      const candidateWorldDescriptionKeys = [
+        ...worldDescriptionKeys,
+        ...(worldIslandId
+          ? [
+              `${stateRoot}/Saved/SaveProfiles/Default/Worlds/${worldIslandId}/WorldDescription.json`,
+              `${stateRoot}/R5/Saved/SaveProfiles/Default/Worlds/${worldIslandId}/WorldDescription.json`,
+            ]
+          : []),
+      ];
+      for (const key of candidateWorldDescriptionKeys) {
         worldDescription = parseJsonObject(await getS3ObjectText(location.bucket, key));
         if (worldDescription) {
           worldDescriptionKey = key;
           break;
+        }
+      }
+      if (!worldDescription) {
+        const stateKeys = await listS3Keys(location.bucket, `${stateRoot}/`);
+        for (const key of stateKeys.filter((candidate) => candidate.endsWith("/WorldDescription.json"))) {
+          worldDescription = parseJsonObject(await getS3ObjectText(location.bucket, key));
+          if (worldDescription) {
+            worldDescriptionKey = key;
+            break;
+          }
         }
       }
 
@@ -2249,13 +2331,133 @@ export function createRouter(): Router {
           textField(serverDescription, "InviteCode") ||
           textField(serverDescription, "inviteCode"),
         serverName:
-          textField(serverDescription, "Name") ||
           textField(serverDescription, "ServerName") ||
+          textField(serverDescription, "Name") ||
           textField(serverDescription, "name"),
+        isPasswordProtected: booleanField(serverDescription, "IsPasswordProtected"),
+        maxPlayerCount: numberField(serverDescription, "MaxPlayerCount"),
+        worldIslandId,
+        combatDifficulty: textField(worldDescription, "CombatDifficulty"),
+        mobHealthMultiplier: numberField(worldDescription, "MobHealthMultiplier"),
+        mobDamageMultiplier: numberField(worldDescription, "MobDamageMultiplier"),
         serverDescriptionKey,
         worldDescriptionKey,
         serverDescription,
         worldDescription,
+      });
+    }),
+  );
+
+  router.put(
+    "/v1/games/:gameId/worlds/:worldId/runtime-info",
+    withAsync(async (req, res) => {
+      const gameId = routeParam(req.params.gameId);
+      const worldId = routeParam(req.params.worldId);
+      if (gameId.toLowerCase() !== "windrose") {
+        res.status(400).json({ error: "runtime-info editing is only supported for Windrose" });
+        return;
+      }
+
+      const body = req.body as {
+        serverDescription?: unknown;
+        worldDescription?: unknown;
+        serverDescriptionKey?: unknown;
+        worldDescriptionKey?: unknown;
+      };
+      if (body.serverDescription !== undefined && !isObject(body.serverDescription)) {
+        res.status(400).json({ error: "serverDescription must be a JSON object" });
+        return;
+      }
+      if (body.worldDescription !== undefined && !isObject(body.worldDescription)) {
+        res.status(400).json({ error: "worldDescription must be a JSON object" });
+        return;
+      }
+      if (body.serverDescription === undefined && body.worldDescription === undefined) {
+        res.status(400).json({ error: "serverDescription or worldDescription is required" });
+        return;
+      }
+
+      const world = await worldPresetsRepository.get(worldPk(gameId, worldId));
+      if (!world || !isGameWorldForGame(world, gameId)) {
+        res.status(404).json({ error: "world not found" });
+        return;
+      }
+
+      const location = await resolveWorldConfigLocation(gameId, world);
+      const writtenKeys = new Set<string>();
+      const writeJson = async (key: string, value: Record<string, unknown>) => {
+        if (writtenKeys.has(key)) return;
+        await s3Client.send(
+          new PutObjectCommand({
+            Bucket: location.bucket,
+            Key: key,
+            Body: `${JSON.stringify(value, null, 2)}\n`,
+            ContentType: "application/json",
+          }),
+        );
+        writtenKeys.add(key);
+      };
+
+      if (isObject(body.serverDescription)) {
+        await writeJson(
+          windroseStableServerDescriptionKey(location.worldPrefix),
+          body.serverDescription,
+        );
+        if (
+          isSafeWorldJsonKey(
+            body.serverDescriptionKey,
+            location.worldPrefix,
+            "ServerDescription.json",
+          )
+        ) {
+          await writeJson(body.serverDescriptionKey, body.serverDescription);
+        } else {
+          await writeJson(
+            `${location.worldPrefix.replace(/\/+$/, "")}/state/ServerDescription.json`,
+            body.serverDescription,
+          );
+        }
+      }
+
+      if (isObject(body.worldDescription)) {
+        await writeJson(
+          windroseStableWorldDescriptionKey(location.worldPrefix),
+          body.worldDescription,
+        );
+        if (
+          isSafeWorldJsonKey(
+            body.worldDescriptionKey,
+            location.worldPrefix,
+            "WorldDescription.json",
+          )
+        ) {
+          await writeJson(body.worldDescriptionKey, body.worldDescription);
+        } else {
+          const islandId =
+            textField(isObject(body.serverDescription) ? body.serverDescription : undefined, "WorldIslandId") ||
+            textField(body.worldDescription, "IslandId");
+          if (islandId) {
+            await writeJson(
+              `${location.worldPrefix.replace(/\/+$/, "")}/state/Saved/SaveProfiles/Default/Worlds/${islandId}/WorldDescription.json`,
+              body.worldDescription,
+            );
+          }
+        }
+      }
+
+      const updatedWorld = {
+        ...world,
+        worldPrefix: location.worldPrefix,
+        updatedAt: new Date().toISOString(),
+      };
+      await worldPresetsRepository.put(updatedWorld);
+
+      res.json({
+        bucket: location.bucket,
+        worldPrefix: location.worldPrefix,
+        writtenKeys: Array.from(writtenKeys),
+        serverDescriptionKey: windroseStableServerDescriptionKey(location.worldPrefix),
+        worldDescriptionKey: windroseStableWorldDescriptionKey(location.worldPrefix),
       });
     }),
   );

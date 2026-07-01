@@ -31,6 +31,7 @@ import {
   stopGameServer,
   stopInstance,
   streamLogs,
+  saveWorldRuntimeInfo,
   saveWorldServerConfig,
   terminateInstance,
   updateConfig,
@@ -132,6 +133,21 @@ function supportsServerConfig(gameId: string): boolean {
   return gameId.toLowerCase() === '7d2d';
 }
 
+function supportsRuntimeJsonConfig(gameId: string): boolean {
+  return gameId.toLowerCase() === 'windrose';
+}
+
+function s3KeyFromDisplayPath(displayPath: string, bucket?: string): string | undefined {
+  const trimmed = displayPath.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  if (bucket && trimmed.startsWith(`${bucket}/`)) {
+    return trimmed.slice(bucket.length + 1);
+  }
+  return trimmed;
+}
+
 function worldS3Prefix(world: WorldPreset): string {
   const rawPrefix = typeof world.worldPrefix === 'string' ? world.worldPrefix : '';
   if (rawPrefix) {
@@ -219,6 +235,10 @@ export default function App() {
   const [serverConfigKey, setServerConfigKey] = useState('');
   const [serverConfigLoading, setServerConfigLoading] = useState(false);
   const [serverConfigSaving, setServerConfigSaving] = useState(false);
+  const [runtimeServerJson, setRuntimeServerJson] = useState('{}');
+  const [runtimeWorldJson, setRuntimeWorldJson] = useState('{}');
+  const [runtimeServerKey, setRuntimeServerKey] = useState('');
+  const [runtimeWorldKey, setRuntimeWorldKey] = useState('');
 
   const pollRef = useRef<Record<string, number>>({});
   const logStreamRef = useRef<AbortController | null>(null);
@@ -457,11 +477,24 @@ export default function App() {
       setConfigError('');
       try {
         const gameId = instanceGameId(selectedInstance);
-        if (gameId && selectedInstance.selectedWorldId) {
+        if (gameId && selectedInstance.selectedWorldId && supportsServerConfig(gameId)) {
           setServerConfigLoading(true);
           const worldConfig = await getWorldServerConfig(gameId, selectedInstance.selectedWorldId);
           setServerConfigXml(worldConfig.configXml || '');
           setServerConfigKey(`${worldConfig.bucket}/${worldConfig.key}`);
+          return;
+        }
+        if (gameId && selectedInstance.selectedWorldId && supportsRuntimeJsonConfig(gameId)) {
+          setServerConfigLoading(true);
+          const runtimeInfo = await getWorldRuntimeInfo(gameId, selectedInstance.selectedWorldId);
+          setRuntimeServerJson(JSON.stringify(runtimeInfo.serverDescription ?? {}, null, 2));
+          setRuntimeWorldJson(JSON.stringify(runtimeInfo.worldDescription ?? {}, null, 2));
+          setRuntimeServerKey(runtimeInfo.serverDescriptionKey ? `${runtimeInfo.bucket}/${runtimeInfo.serverDescriptionKey}` : '');
+          setRuntimeWorldKey(runtimeInfo.worldDescriptionKey ? `${runtimeInfo.bucket}/${runtimeInfo.worldDescriptionKey}` : '');
+          setWorldRuntimeInfo((current) => ({
+            ...current,
+            [`${gameId}:${selectedInstance.selectedWorldId}`]: runtimeInfo,
+          }));
           return;
         }
         const configResponse = await getConfig(instanceId(selectedInstance));
@@ -638,6 +671,31 @@ export default function App() {
         const saved = await saveWorldServerConfig(gameId, selectedInstance.selectedWorldId, serverConfigXml);
         setServerConfigKey(`${saved.bucket}/${saved.key}`);
         notify('success', 'serverconfig.xml saved. Restart 7D2D to apply it.');
+        return;
+      }
+      if (gameId && selectedInstance.selectedWorldId && supportsRuntimeJsonConfig(gameId)) {
+        const serverDescription = JSON.parse(runtimeServerJson);
+        const worldDescription = JSON.parse(runtimeWorldJson);
+        if (!isObject(serverDescription) || !isObject(worldDescription)) {
+          throw new SyntaxError('Windrose config files must be JSON objects');
+        }
+        setServerConfigSaving(true);
+        setConfigError('');
+        const runtimeInfo = worldRuntimeInfo[`${gameId}:${selectedInstance.selectedWorldId}`];
+        const saved = await saveWorldRuntimeInfo(gameId, selectedInstance.selectedWorldId, {
+          serverDescription,
+          worldDescription,
+          serverDescriptionKey: s3KeyFromDisplayPath(runtimeServerKey, runtimeInfo?.bucket),
+          worldDescriptionKey: s3KeyFromDisplayPath(runtimeWorldKey, runtimeInfo?.bucket),
+        });
+        setRuntimeServerKey(saved.serverDescriptionKey ? `${saved.bucket}/${saved.serverDescriptionKey}` : runtimeServerKey);
+        setRuntimeWorldKey(saved.worldDescriptionKey ? `${saved.bucket}/${saved.worldDescriptionKey}` : runtimeWorldKey);
+        const refreshed = await getWorldRuntimeInfo(gameId, selectedInstance.selectedWorldId);
+        setWorldRuntimeInfo((current) => ({
+          ...current,
+          [`${gameId}:${selectedInstance.selectedWorldId}`]: refreshed,
+        }));
+        notify('success', 'Windrose JSON saved. Restart Windrose to apply it.');
         return;
       }
       const parsed = JSON.parse(configText);
@@ -1176,6 +1234,18 @@ export default function App() {
                             <>
                               <span>Invite code</span>
                               <strong>{inviteCode || 'Available after first backup'}</strong>
+                              <span>Server name</span>
+                              <strong>{runtimeInfo?.serverName || '—'}</strong>
+                              <span>Max players</span>
+                              <strong>{runtimeInfo?.maxPlayerCount ?? '—'}</strong>
+                              <span>World island</span>
+                              <strong>{runtimeInfo?.worldIslandId || '—'}</strong>
+                              <span>Difficulty</span>
+                              <strong>{runtimeInfo?.combatDifficulty || '—'}</strong>
+                              <span>Server JSON</span>
+                              <strong>{runtimeInfo?.serverDescriptionKey || 'Not backed up yet'}</strong>
+                              <span>World JSON</span>
+                              <strong>{runtimeInfo?.worldDescriptionKey || 'Not backed up yet'}</strong>
                             </>
                           )}
                         </div>
@@ -1606,6 +1676,35 @@ export default function App() {
                           spellCheck={false}
                         />
                       </>
+                    ) : instanceGameId(selectedInstance) && selectedInstance.selectedWorldId && supportsRuntimeJsonConfig(instanceGameId(selectedInstance)) ? (
+                      <>
+                        <p className="field-hint">
+                          Editing Windrose JSON files for world {selectedInstance.worldName || selectedInstance.selectedWorldId}.
+                          Restart Windrose after saving to apply changes.
+                        </p>
+                        <label>
+                          ServerDescription.json
+                          {runtimeServerKey && <small className="field-hint">S3: {runtimeServerKey}</small>}
+                          <textarea
+                            value={serverConfigLoading ? 'Loading ServerDescription.json…' : runtimeServerJson}
+                            onChange={(event) => setRuntimeServerJson(event.target.value)}
+                            className="json-editor"
+                            disabled={serverConfigLoading}
+                            spellCheck={false}
+                          />
+                        </label>
+                        <label>
+                          WorldDescription.json
+                          {runtimeWorldKey && <small className="field-hint">S3: {runtimeWorldKey}</small>}
+                          <textarea
+                            value={serverConfigLoading ? 'Loading WorldDescription.json…' : runtimeWorldJson}
+                            onChange={(event) => setRuntimeWorldJson(event.target.value)}
+                            className="json-editor"
+                            disabled={serverConfigLoading}
+                            spellCheck={false}
+                          />
+                        </label>
+                      </>
                     ) : (
                       <>
                         <textarea
@@ -1630,7 +1729,11 @@ export default function App() {
                         disabled={configSaving || serverConfigSaving || serverConfigLoading}
                         onClick={handleSaveConfig}
                       >
-                        {instanceGameId(selectedInstance) && selectedInstance.selectedWorldId && supportsServerConfig(instanceGameId(selectedInstance)) ? 'Save serverconfig.xml' : 'Save config'}
+                        {instanceGameId(selectedInstance) && selectedInstance.selectedWorldId && supportsServerConfig(instanceGameId(selectedInstance))
+                          ? 'Save serverconfig.xml'
+                          : instanceGameId(selectedInstance) && selectedInstance.selectedWorldId && supportsRuntimeJsonConfig(instanceGameId(selectedInstance))
+                            ? 'Save Windrose JSON'
+                            : 'Save config'}
                       </button>
                     </div>
                   </div>

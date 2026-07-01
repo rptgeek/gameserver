@@ -50,6 +50,12 @@ export interface WorldRuntimeInfo {
   worldPrefix?: string;
   inviteCode?: string;
   serverName?: string;
+  isPasswordProtected?: boolean;
+  maxPlayerCount?: number;
+  worldIslandId?: string;
+  combatDifficulty?: string;
+  mobHealthMultiplier?: number;
+  mobDamageMultiplier?: number;
   serverDescriptionKey?: string;
   worldDescriptionKey?: string;
   serverDescription?: Record<string, unknown>;
