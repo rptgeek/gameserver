@@ -26,14 +26,18 @@
     "apiAllowedOrigins": [
       "http://localhost:3000",
       "http://localhost:5173",
+      "https://d151ne23hwzren.cloudfront.net",
       "https://games.example.com"
     ],
     "cognitoCallbackUrls": [
+      "https://d151ne23hwzren.cloudfront.net/auth/callback",
+      "https://d151ne23hwzren.cloudfront.net/",
       "https://games.example.com/auth/callback",
       "https://games.example.com/",
       "http://localhost:3000/auth/callback"
     ],
     "cognitoLogoutUrls": [
+      "https://d151ne23hwzren.cloudfront.net/",
       "https://games.example.com/",
       "http://localhost:3000/"
     ]
