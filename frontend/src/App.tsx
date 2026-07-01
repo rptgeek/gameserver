@@ -34,6 +34,7 @@ import {
   saveWorldRuntimeInfo,
   saveWorldServerConfig,
   terminateInstance,
+  UnauthorizedError,
   updateConfig,
 } from './api';
 import type {
@@ -525,7 +526,12 @@ export default function App() {
         setLogs(response.lines);
         setLogsNextToken(response.nextToken);
       } catch (error) {
-        notify('error', error instanceof Error ? error.message : 'Failed to load logs');
+        if (error instanceof UnauthorizedError) {
+          setLogsAutoRefresh(false);
+          notify('error', 'Session expired. Sign in again to continue loading logs.');
+        } else {
+          notify('error', error instanceof Error ? error.message : 'Failed to load logs');
+        }
       } finally {
         setLogsLoading(false);
       }
@@ -544,7 +550,12 @@ export default function App() {
         setLogs(response.lines);
         setLogsNextToken(response.nextToken);
       } catch (error) {
-        notify('error', error instanceof Error ? error.message : 'Log auto-refresh failed');
+        if (error instanceof UnauthorizedError) {
+          setLogsAutoRefresh(false);
+          notify('error', 'Session expired. Sign in again to continue loading logs.');
+        } else {
+          notify('error', error instanceof Error ? error.message : 'Log auto-refresh failed');
+        }
       }
     }, 6000);
 

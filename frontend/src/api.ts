@@ -1,4 +1,4 @@
-import { getAuthToken } from './auth';
+import { clearAuthToken, getAuthToken } from './auth';
 import type {
   Game,
   GameProfile,
@@ -19,6 +19,13 @@ const API_BASE_URL = (env.VITE_API_BASE_URL || '/api').replace(/\/+$/, '');
 
 type Query = Record<string, string | undefined>;
 type GetOperationApiResponse = OperationResult | { operation: OperationResult };
+
+export class UnauthorizedError extends Error {
+  constructor(message = 'Unauthorized') {
+    super(message);
+    this.name = 'UnauthorizedError';
+  }
+}
 
 function toUrl(path: string, query?: Query): string {
   const params = new URLSearchParams();
@@ -101,6 +108,10 @@ async function request<T>(path: string, init: RequestInit = {}, query?: Query): 
       }
     } catch {
       // keep raw text/status
+    }
+    if (response.status === 401) {
+      clearAuthToken();
+      throw new UnauthorizedError(msg || 'Unauthorized');
     }
     throw new Error(msg || 'Request failed');
   }

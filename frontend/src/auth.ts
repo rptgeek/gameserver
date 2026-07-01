@@ -98,6 +98,12 @@ export async function signOut() {
   tokenExpiresAt = 0;
 }
 
+export function clearAuthToken() {
+  tokenCache = null;
+  tokenExpiresAt = 0;
+  localStorage.removeItem('id_token');
+}
+
 export async function getCurrentUserProfile(): Promise<AuthUser | null> {
   await initializeAuth();
   if (!cognitoConfigured()) {
