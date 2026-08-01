@@ -365,11 +365,132 @@ tbody tr:hover {
   color: #ffc39e;
 }
 
+.launch-progress {
+  width: 100%;
+  margin: 0.75rem 0;
+  padding: 0.7rem;
+  border: 1px solid rgba(45, 231, 203, 0.22);
+  border-radius: 8px;
+  background: rgba(5, 12, 29, 0.62);
+}
+
+.launch-progress.compact {
+  min-width: 210px;
+  margin: 0.4rem 0 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.launch-progress-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.6rem;
+  font-size: 0.86rem;
+}
+
+.launch-progress-top strong {
+  color: #f4f8ff;
+  font-size: 0.9rem;
+}
+
+.launch-progress-top span {
+  color: #8ff4e1;
+  white-space: nowrap;
+}
+
+.launch-progress-track {
+  height: 8px;
+  margin-top: 0.45rem;
+  border-radius: 999px;
+  background: rgba(117, 138, 201, 0.28);
+  overflow: hidden;
+}
+
+.launch-progress-track span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #2de7cb, #7e8cff);
+  transition: width 260ms ease;
+}
+
+.launch-progress.ready .launch-progress-track span {
+  background: linear-gradient(90deg, #37e690, #2de7cb);
+}
+
+.launch-phase-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: 0.6rem;
+}
+
+.launch-phase-list span {
+  border: 1px solid rgba(147, 161, 210, 0.22);
+  border-radius: 999px;
+  padding: 0.16rem 0.45rem;
+  color: var(--muted);
+  font-size: 0.74rem;
+}
+
+.launch-phase-list span.done {
+  color: #8ff4e1;
+  border-color: rgba(45, 231, 203, 0.35);
+}
+
+.launch-phase-list span.active {
+  color: #ffffff;
+  border-color: rgba(140, 124, 255, 0.65);
+  background: rgba(140, 124, 255, 0.18);
+}
+
+.launch-progress-note {
+  margin-top: 0.55rem;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.overview-wide {
+  grid-column: 1 / -1;
+}
+
 .row-actions,
 .actions {
   display: flex;
   gap: 0.45rem;
   flex-wrap: wrap;
+}
+
+.json-key-action {
+  display: flex;
+  align-items: baseline;
+  gap: 0.55rem;
+  min-width: 0;
+}
+
+.json-key-action span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.link-button {
+  border: 0;
+  background: transparent;
+  color: #8ff4e1;
+  padding: 0;
+  font: inherit;
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.link-button:hover,
+.link-button:focus-visible {
+  color: #ffffff;
 }
 
 .tabs {

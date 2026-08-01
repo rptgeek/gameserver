@@ -406,11 +406,11 @@ mkdir -p /tmp
 
 if command -v yum >/dev/null 2>&1; then
   yum -y update
-  yum -y install ${YUM_BASE_PACKAGES:-ca-certificates tar gzip glibc libstdc++}
+  yum -y install ${YUM_BASE_PACKAGES:-ca-certificates tar gzip glibc libstdc++ python3}
 elif command -v apt-get >/dev/null 2>&1; then
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
-  apt-get install -y ca-certificates tar gzip curl
+  apt-get install -y ca-certificates tar gzip curl python3
   dpkg --add-architecture i386 || true
   apt-get update
   apt-get install -y libc6:i386 libstdc++6:i386 || true
@@ -459,10 +459,10 @@ else
   STATE_LINK="\${STATE_LINK%/}"
 fi
 
-mkdir -p "\${STATE_DIR_PATH}"
+mkdir -p "\${STATE_DIR_PATH}" "\${GAME_HOME}"
 mkdir -p "\${STATE_LINK%/*}"
 if id -u "\$SERVICE_USER" >/dev/null 2>&1; then
-  chown -R "\$SERVICE_USER:\$SERVICE_USER" "\${STATE_DIR_PATH}" "\${STATE_LINK%/*}" || true
+  chown -R "\$SERVICE_USER:\$SERVICE_USER" "\${STATE_DIR_PATH}" "\${GAME_HOME}" "\${STATE_LINK%/*}" || true
   chmod -R u+rwX "\${STATE_DIR_PATH}" || true
 fi
 ln -sfn "\${STATE_DIR_PATH}" "\${STATE_LINK}"
@@ -536,6 +536,15 @@ XML
 }
 
 install_game() {
+  mkdir -p "\${GAME_HOME}"
+  install_cmd="\$(decode "\$GAME_INSTALL_CMD_B64")"
+
+  if [[ "\${GAME_SERVICE}" == "windrose" ]]; then
+    echo "Installing Windrose via profile install command."
+    bash -lc "\${install_cmd}"
+    return
+  fi
+
   mkdir -p /opt/steamcmd "\${GAME_HOME%/*}"
   if [[ ! -x /opt/steamcmd/steamcmd.sh ]]; then
     curl -fsSL https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz -o /tmp/steamcmd_linux.tar.gz
@@ -572,7 +581,6 @@ install_game() {
 
   ensure_steamcmd_runtime || true
 
-  install_cmd="\$(decode "\$GAME_INSTALL_CMD_B64")"
   local install_branches
   local tried_branches
   local branch
@@ -616,6 +624,69 @@ install_game() {
     echo "All app_update attempts failed."
     return 1
   fi
+}
+
+install_windrose_monitor() {
+  if [[ "\${GAME_SERVICE}" != "windrose" ]]; then
+    return 0
+  fi
+
+  local monitor_dir="/opt/windrose-monitor"
+  mkdir -p "\${monitor_dir}" /var/lib/windrose-monitor
+  if curl -fsSL https://codeload.github.com/paulsena/windrose-server-monitor/tar.gz/refs/heads/main -o /tmp/windrose-server-monitor.tar.gz; then
+    tar -xzf /tmp/windrose-server-monitor.tar.gz --strip-components=1 -C "\${monitor_dir}"
+  else
+    echo "WARNING: Could not download Windrose monitor; monitor service may not start."
+  fi
+
+  python3 - <<'MONITOR_PATCH'
+from pathlib import Path
+
+path = Path("/opt/windrose-monitor/windrose_monitor.py")
+text = path.read_text()
+if "def load_server_info_from_description()" not in text:
+    text = text.replace(
+        "def build_api_payload(roster: Roster, known: KnownPlayers, parser: DumpParser) -> dict:\n",
+        '''def load_server_info_from_description() -> dict | None:\n    path = os.getenv("WINDROSE_SERVER_DESCRIPTION", "/srv/windrose-state/ServerDescription.json")\n    try:\n        with open(path, "r", encoding="utf-8") as f:\n            data = json.load(f)\n    except (OSError, json.JSONDecodeError):\n        return None\n    desc = data.get("ServerDescription_Persistent", {})\n    if not isinstance(desc, dict):\n        return None\n    return {\n        "server_name": desc.get("ServerName", ""),\n        "max_players": desc.get("MaxPlayerCount", 0),\n        "password_protected": desc.get("IsPasswordProtected", False),\n        "invite_code": desc.get("InviteCode", ""),\n        "world_id": desc.get("WorldIslandId", ""),\n        "deployment_id": data.get("DeploymentId", ""),\n        "direct_connection": {\n            "enabled": desc.get("UseDirectConnection", False),\n            "address": desc.get("DirectConnectionServerAddress", ""),\n            "port": desc.get("DirectConnectionServerPort", -1),\n        },\n    }\n\n\ndef build_api_payload(roster: Roster, known: KnownPlayers, parser: DumpParser) -> dict:\n''',
+    )
+    text = text.replace(
+        "    started, server_info = parser.get_server_state()\n\n    return {\n",
+        "    started, server_info = parser.get_server_state()\n    if server_info is None:\n        server_info = load_server_info_from_description()\n\n    return {\n",
+    )
+    path.write_text(text)
+MONITOR_PATCH
+
+  cat > /opt/windrose-monitor/run-monitor.sh <<'MONITOR_RUNNER'
+#!/usr/bin/env bash
+set -euo pipefail
+
+state_dir="\${STATE_DIR_PATH:-/srv/windrose-state}"
+log_path="\${WINDROSE_MONITOR_LOG:-}"
+if [[ -z "\${log_path}" ]]; then
+  while [[ -z "\${log_path}" ]]; do
+    for candidate in \\
+      "\${state_dir}/Saved/Logs/R5.log" \\
+      "\${state_dir}/Logs/R5.log" \\
+      "\${state_dir}/R5.log"; do
+      if [[ -f "\${candidate}" ]]; then
+        log_path="\${candidate}"
+        break
+      fi
+    done
+    if [[ -z "\${log_path}" ]]; then
+      sleep 5
+    fi
+  done
+fi
+
+cd /opt/windrose-monitor
+exec /usr/bin/python3 /opt/windrose-monitor/windrose_monitor.py \
+  --log "\${log_path}" \
+  --host 0.0.0.0 \
+  --port "\${WINDROSE_MONITOR_PORT:-8080}" \
+  --state /var/lib/windrose-monitor/player_state.json
+MONITOR_RUNNER
+  chmod +x /opt/windrose-monitor/run-monitor.sh
 }
 
 cat > "\${STATE_TOOLS_DIR}/restore-state.sh" <<'EOS'
@@ -989,14 +1060,38 @@ Persistent=true
 WantedBy=timers.target
 BACKUP_TIMER
 
-systemctl daemon-reload
+if [[ "\${GAME_SERVICE}" == "windrose" ]]; then
+  cat > "/etc/systemd/system/\${GAME_SERVICE}-monitor.service" <<MONITOR_SERVICE
+[Unit]
+Description=Windrose player monitor
+After=network.target \${GAME_SERVICE}-server.service
+Wants=\${GAME_SERVICE}-server.service
+
+[Service]
+Type=simple
+Environment=STATE_DIR_PATH=\${STATE_DIR_PATH}
+Environment=WINDROSE_MONITOR_PORT=8080
+ExecStart=/opt/windrose-monitor/run-monitor.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+MONITOR_SERVICE
+fi
+
 restore_state
 install_game
 apply_server_config
+install_windrose_monitor
+systemctl daemon-reload
 
 systemctl enable "\${GAME_SERVICE}-server.service" "\${GAME_SERVICE}-watchdog.service" "\${GAME_SERVICE}-shutdown-save.service"
 systemctl start "\${GAME_SERVICE}-server.service"
 systemctl enable --now "\${GAME_SERVICE}-backup.timer"
+if [[ "\${GAME_SERVICE}" == "windrose" ]]; then
+  systemctl enable --now "\${GAME_SERVICE}-monitor.service"
+fi
 
 cat <<INFO
 \${GAME_NAME} Spot instance bootstrap complete.

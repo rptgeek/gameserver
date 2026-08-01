@@ -211,6 +211,26 @@ export class PlatformInfraStack extends cdk.Stack {
       }),
     );
 
+    const gameServerEc2Role = iam.Role.fromRoleName(this, 'GameServerEc2Role', '7d2d-ec2-role', {
+      mutable: true,
+    });
+    gameServerEc2Role.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        sid: 'WindroseAmiBuilderSelfManagement',
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'ec2:CreateImage',
+          'ec2:CreateTags',
+          'ec2:DescribeImages',
+          'ec2:DescribeInstances',
+          'ec2:DeregisterImage',
+          'ec2:DeleteSnapshot',
+          'ec2:TerminateInstances',
+        ],
+        resources: ['*'],
+      }),
+    );
+
     backendLambdaRole.addToPolicy(
       new iam.PolicyStatement({
         sid: 'SsmCalls',
@@ -482,7 +502,7 @@ export class PlatformInfraStack extends cdk.Stack {
       description: 'Backend API gateway using Cognito JWT authorizer',
       corsPreflight: {
         allowCredentials: false,
-        allowHeaders: ['Authorization', 'Content-Type'],
+        allowHeaders: ['Authorization', 'Content-Type', 'Idempotency-Key'],
         allowMethods: [apigateway.CorsHttpMethod.ANY],
         allowOrigins: apiAllowedOrigins,
         maxAge: cdk.Duration.days(1),

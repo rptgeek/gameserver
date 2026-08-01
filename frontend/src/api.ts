@@ -59,27 +59,33 @@ function normalizeList<T>(payload: unknown, fallbackKeys: string[] = []): T[] {
   return [];
 }
 
-async function request<T>(path: string, init: RequestInit = {}, query?: Query): Promise<T> {
+type ApiRequestInit = RequestInit & { idempotencyKey?: string };
+
+async function request<T>(path: string, init: ApiRequestInit = {}, query?: Query): Promise<T> {
   const token = await getAuthToken();
-  const headers = new Headers(init.headers || {});
+  const { idempotencyKey, ...fetchInit } = init;
+  const headers = new Headers(fetchInit.headers || {});
   headers.set('Accept', 'application/json');
 
-  let body = init.body;
-  if (typeof init.body === 'string') {
+  let body = fetchInit.body;
+  if (typeof fetchInit.body === 'string') {
     headers.set('Content-Type', 'application/json');
-  } else if (init.body && typeof init.body !== 'string' && !(init.body instanceof FormData)) {
+  } else if (fetchInit.body && typeof fetchInit.body !== 'string' && !(fetchInit.body instanceof FormData)) {
     headers.set('Content-Type', 'application/json');
-    body = JSON.stringify(init.body);
-  } else if (init.body === undefined) {
+    body = JSON.stringify(fetchInit.body);
+  } else if (fetchInit.body === undefined) {
     body = undefined;
   }
 
   if (token) {
     headers.set('Authorization', `Bearer ${token}`);
   }
+  if (idempotencyKey) {
+    headers.set('Idempotency-Key', idempotencyKey);
+  }
 
   const response = await fetch(toUrl(path, query), {
-    ...init,
+    ...fetchInit,
     headers,
     body,
   });
@@ -380,7 +386,7 @@ export async function createInstance(payload: {
   selectedWorldId?: string;
   worldName?: string;
   steamBetaBranch?: string;
-}): Promise<ServerInstance> {
+}, idempotencyKey?: string): Promise<ServerInstance> {
   const result = await request<
     | ServerInstance
     | { instance?: ServerInstance; instanceIds?: string[]; instances?: string[]; operationId?: string }
@@ -388,6 +394,7 @@ export async function createInstance(payload: {
   >('/v1/instances', {
     method: 'POST',
     body: payload,
+    idempotencyKey,
   });
 
   if (!result || typeof result !== 'object') {

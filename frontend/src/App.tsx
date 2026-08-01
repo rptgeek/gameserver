@@ -1,5 +1,5 @@
 import React from 'react';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   getCurrentUserProfile,
   initializeAuth,
@@ -51,6 +51,30 @@ import type {
 } from './types';
 
 type DetailTab = 'overview' | 'bootstrap-logs' | 'server-logs' | 'console' | 'config';
+type WindroseJsonFocus = 'server' | 'world';
+type LaunchPhaseKey = 'ec2' | 'bootstrap' | 'files' | 'install' | 'config' | 'game' | 'ready';
+
+interface LaunchPhaseDefinition {
+  key: LaunchPhaseKey;
+  label: string;
+  estimateSeconds: number;
+}
+
+interface LaunchProgress {
+  phase: LaunchPhaseDefinition;
+  phaseIndex: number;
+  elapsedSeconds: number;
+  remainingSeconds: number;
+  percent: number;
+  ready: boolean;
+  statusText: string;
+  endpoint?: string;
+}
+
+interface LaunchPhaseMarker {
+  key: LaunchPhaseKey;
+  atMs?: number;
+}
 
 interface Toast {
   id: string;
@@ -138,6 +162,269 @@ function supportsRuntimeJsonConfig(gameId: string): boolean {
   return gameId.toLowerCase() === 'windrose';
 }
 
+function windroseMonitorUrl(publicIp?: string): string | undefined {
+  return publicIp ? `http://${publicIp}:8080` : undefined;
+}
+
+const LAUNCH_PHASES: LaunchPhaseDefinition[] = [
+  { key: 'ec2', label: 'Launching EC2 server', estimateSeconds: 75 },
+  { key: 'bootstrap', label: 'Bootstrapping host', estimateSeconds: 95 },
+  { key: 'files', label: 'Loading save files', estimateSeconds: 45 },
+  { key: 'install', label: 'Installing game files', estimateSeconds: 240 },
+  { key: 'config', label: 'Updating server config', estimateSeconds: 25 },
+  { key: 'game', label: 'Launching game server', estimateSeconds: 120 },
+  { key: 'ready', label: 'Game ready', estimateSeconds: 0 },
+];
+
+const BAKED_LAUNCH_PHASES: LaunchPhaseDefinition[] = [
+  { key: 'ec2', label: 'Launching EC2 server', estimateSeconds: 60 },
+  { key: 'bootstrap', label: 'Bootstrapping host', estimateSeconds: 45 },
+  { key: 'files', label: 'Loading save files', estimateSeconds: 50 },
+  { key: 'install', label: 'Game files ready', estimateSeconds: 10 },
+  { key: 'config', label: 'Updating server config', estimateSeconds: 15 },
+  { key: 'game', label: 'Launching game server', estimateSeconds: 55 },
+  { key: 'ready', label: 'Game ready', estimateSeconds: 0 },
+];
+
+function totalLaunchSeconds(phases: LaunchPhaseDefinition[]): number {
+  return phases.reduce(
+  (total, phase) => total + phase.estimateSeconds,
+  0,
+  );
+}
+
+const TOTAL_LAUNCH_SECONDS = totalLaunchSeconds(LAUNCH_PHASES);
+
+function launchPhasesFor(instance: ServerInstance): LaunchPhaseDefinition[] {
+  return String(instance.amiSource || '').toLowerCase() === 'baked' ? BAKED_LAUNCH_PHASES : LAUNCH_PHASES;
+}
+
+function formatDuration(seconds: number): string {
+  const safe = Math.max(0, Math.ceil(seconds));
+  const minutes = Math.floor(safe / 60);
+  const rest = safe % 60;
+  return `${minutes}:${rest.toString().padStart(2, '0')}`;
+}
+
+function launchPort(instance: ServerInstance): number {
+  return instanceGameId(instance).toLowerCase() === 'windrose' ? 7777 : 26900;
+}
+
+function launchStartedAt(instance: ServerInstance): number | undefined {
+  const source = instance.startedAt || instance.createdAt;
+  if (!source) {
+    return undefined;
+  }
+  const parsed = Date.parse(source);
+  return Number.isNaN(parsed) ? undefined : parsed;
+}
+
+function phaseIndexForElapsed(phases: LaunchPhaseDefinition[], elapsedSeconds: number): number {
+  let cursor = 0;
+  for (let index = 0; index < phases.length - 1; index += 1) {
+    cursor += phases[index].estimateSeconds;
+    if (elapsedSeconds < cursor) {
+      return index;
+    }
+  }
+  return phases.length - 2;
+}
+
+function phaseMarkerFromLogs(lines: string[]): LaunchPhaseMarker | undefined {
+  let current: LaunchPhaseMarker | undefined;
+  for (const line of lines) {
+    const match = line.match(/LAUNCH_PHASE\s+phase=([a-z-]+).*?\bat=([^\s]+)/i);
+    const marker = (match?.[1] || line.match(/LAUNCH_PHASE\s+phase=([a-z-]+)/i)?.[1])?.toLowerCase();
+    if (
+      marker === 'ec2' ||
+      marker === 'bootstrap' ||
+      marker === 'files' ||
+      marker === 'install' ||
+      marker === 'config' ||
+      marker === 'game' ||
+      marker === 'ready'
+    ) {
+      const parsedAt = match?.[2] ? Date.parse(match[2]) : Number.NaN;
+      current = { key: marker, atMs: Number.isNaN(parsedAt) ? undefined : parsedAt };
+      continue;
+    }
+    const lower = line.toLowerCase();
+    if (lower.includes('bootstrap complete')) current = { key: 'ready' };
+    else if (lower.includes('success! app') && lower.includes('fully installed')) current = { key: 'install' };
+    else if (lower.includes(' update state ') || lower.includes('steamcmd') || lower.includes('download complete')) current = { key: 'install' };
+    else if (lower.includes('pulling from windroseserver') || lower.includes('downloaded newer image')) current = { key: 'install' };
+    else if (lower.includes('aws s3 sync') || lower.includes('world path:')) current = { key: 'files' };
+    else if (lower.includes('serverdescription.json')) current = { key: 'config' };
+  }
+  return current;
+}
+
+function remainingSecondsForPhase(
+  phases: LaunchPhaseDefinition[],
+  phaseIndex: number,
+  elapsedInPhaseSeconds: number,
+): number {
+  return phases
+    .slice(phaseIndex, phases.length - 1)
+    .reduce((total, phase, index) => {
+      if (index === 0) {
+        return total + Math.max(0, phase.estimateSeconds - elapsedInPhaseSeconds);
+      }
+      return total + phase.estimateSeconds;
+    }, 0);
+}
+
+function launchStatusFromLogs(lines: string[], endpoint?: string): string | undefined {
+  for (const line of [...lines].reverse()) {
+    const packageLine = line.match(/^(Get|Ign|Err):(\d+)\s+.*?(?:\s([A-Za-z0-9_.:+~/-]+)\s+\[[^\]]+\])?$/);
+    if (packageLine?.[2]) {
+      const index = Number(packageLine[2]);
+      const verb = packageLine[1] === 'Ign'
+        ? 'Retrying package download'
+        : packageLine[1] === 'Err'
+          ? 'Package download error'
+          : 'Downloading system packages';
+      return `${verb} (${index}/96)`;
+    }
+
+    const lower = line.toLowerCase();
+    const setup = line.match(/Setting up\s+([^:\s)]+)(?::[^\s)]+)?\s+\(([^)]+)\)/i);
+    if (setup?.[1]) {
+      return `Installing package ${setup[1]}`;
+    }
+    if (lower.includes('apt-get install -y awscli')) return 'Installing AWS CLI dependencies';
+    if (lower.includes('apt-get install') && lower.includes('docker')) return 'Installing Docker dependencies';
+    if (lower.includes('pulling from windroseserver')) return 'Downloading Windrose server image';
+    if (lower.includes('downloaded newer image')) return 'Windrose server image downloaded';
+    if (lower.includes('aws s3 sync')) return 'Syncing world files from S3';
+    if (lower.includes('serverdescription.json')) return 'Applying Windrose server configuration';
+    if (lower.includes('started windrose player monitor')) return 'Starting player monitor';
+    if (lower.includes('started windrose-server') || lower.includes('started windrose server')) return 'Starting Windrose server';
+  }
+
+  return endpoint ? `Waiting for game readiness at ${endpoint}` : undefined;
+}
+
+function gameReadyFromLogs(lines: string[]): boolean {
+  return lines.some((line) => {
+    const lower = line.toLowerCase();
+    return (
+      lower.includes('launch_phase phase=ready') ||
+      lower.includes('bootstrap complete') ||
+      lower.includes('loadmap load map complete /game/maps/gym/genlandia/genlandiamulty') ||
+      lower.includes('bringing world /game/maps/gym/genlandia/genlandiamulty') ||
+      lower.includes('ipnetdriver listening on port 7777')
+    );
+  });
+}
+
+function buildLaunchProgress(
+  instance: ServerInstance,
+  logLines: string[],
+  playerStatus: PlayerStatus | undefined,
+  nowMs: number,
+): LaunchProgress | undefined {
+  const status = normalizeStatus(instance.status);
+  const isTerminal = ['stopped', 'terminated', 'error'].includes(status);
+  const startedAt = launchStartedAt(instance);
+  const elapsedSeconds = startedAt ? Math.max(0, Math.floor((nowMs - startedAt) / 1000)) : 0;
+  const endpoint = instance.publicIp ? `${instance.publicIp}:${launchPort(instance)}` : undefined;
+  const hasLaunchLogs = logLines.length > 0;
+  const phases = launchPhasesFor(instance);
+  const totalSeconds = totalLaunchSeconds(phases);
+  const marker = phaseMarkerFromLogs(logLines);
+  const markerPhase = marker?.key;
+  const ready =
+    !isTerminal &&
+    Boolean(instance.publicIp) &&
+    (Boolean(playerStatus?.serverVersion) || markerPhase === 'ready' || gameReadyFromLogs(logLines));
+
+  if (ready) {
+    return {
+      phase: phases[phases.length - 1],
+      phaseIndex: phases.length - 1,
+      elapsedSeconds,
+      remainingSeconds: 0,
+      percent: 100,
+      ready: true,
+      statusText: endpoint ? `Ready at ${endpoint}` : 'Ready',
+      endpoint,
+    };
+  }
+
+  const shouldShow =
+    !isTerminal &&
+    Boolean(startedAt) &&
+    (status === 'launching' || status === 'starting' || status === 'running' || elapsedSeconds < totalSeconds + 300);
+  if (!shouldShow) {
+    return undefined;
+  }
+
+  const markerIndex = markerPhase
+    ? phases.findIndex((phase) => phase.key === markerPhase)
+    : -1;
+  const phaseIndex = markerIndex >= 0 ? markerIndex : phaseIndexForElapsed(phases, elapsedSeconds);
+  const phase = phases[Math.min(phaseIndex, phases.length - 2)];
+  const markerAgeSeconds = marker?.atMs ? Math.max(0, Math.floor((nowMs - marker.atMs) / 1000)) : 0;
+  const estimatedRemainingFromPhase =
+    markerIndex >= 0
+      ? remainingSecondsForPhase(phases, phaseIndex, markerAgeSeconds)
+      : Math.max(0, totalSeconds - elapsedSeconds);
+  const completedEstimate = Math.max(0, totalSeconds - estimatedRemainingFromPhase);
+  const remainingSeconds = Math.max(0, estimatedRemainingFromPhase);
+  const percent = Math.min(98, Math.max(5, (completedEstimate / totalSeconds) * 100));
+  const logStatus = launchStatusFromLogs(logLines, endpoint);
+  const statusText = hasLaunchLogs
+    ? logStatus || (endpoint ? `Waiting for game readiness at ${endpoint}` : 'Waiting for public IP')
+    : 'Waiting for bootstrap logs';
+
+  return {
+    phase,
+    phaseIndex,
+    elapsedSeconds,
+    remainingSeconds,
+    percent,
+    ready: false,
+    statusText,
+    endpoint,
+  };
+}
+
+function LaunchProgressView({
+  progress,
+  compact = false,
+}: {
+  progress: LaunchProgress;
+  compact?: boolean;
+}) {
+  return (
+    <div className={`launch-progress ${compact ? 'compact' : ''} ${progress.ready ? 'ready' : ''}`}>
+      <div className="launch-progress-top">
+        <strong>{progress.phase.label}</strong>
+        <span>{progress.ready ? 'Ready' : `${formatDuration(progress.remainingSeconds)} left`}</span>
+      </div>
+      <div className="launch-progress-track" aria-label="Launch progress">
+        <span style={{ width: `${progress.percent}%` }} />
+      </div>
+      {!compact && (
+        <>
+          <div className="launch-phase-list">
+            {LAUNCH_PHASES.map((phase, index) => (
+              <span
+                key={phase.key}
+                className={index < progress.phaseIndex ? 'done' : index === progress.phaseIndex ? 'active' : ''}
+              >
+                {phase.label}
+              </span>
+            ))}
+          </div>
+          <div className="launch-progress-note">{progress.statusText}</div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function s3KeyFromDisplayPath(displayPath: string, bucket?: string): string | undefined {
   const trimmed = displayPath.trim();
   if (!trimmed) {
@@ -178,8 +465,24 @@ function instanceGameId(instance: ServerInstance): string {
   return String(instance.gameId || instance.game || '');
 }
 
+function runtimeServerLabel(instance: ServerInstance): string {
+  return instanceGameId(instance) === 'windrose' ? 'Windrose' : '7D2D';
+}
+
+function isWorldConfigPlaceholder(instance: ServerInstance): boolean {
+  return instanceId(instance).startsWith('world-config:');
+}
+
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function sameStringArray(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function sameInstanceSnapshot(left: ServerInstance, right: ServerInstance): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
 }
 
 export default function App() {
@@ -196,6 +499,8 @@ export default function App() {
   const [detailTab, setDetailTab] = useState<DetailTab>('overview');
   const [operations, setOperations] = useState<Record<string, OperationResult>>({});
   const [playerStatuses, setPlayerStatuses] = useState<Record<string, PlayerStatus>>({});
+  const [launchLogLines, setLaunchLogLines] = useState<Record<string, string[]>>({});
+  const [launchProgressTick, setLaunchProgressTick] = useState(Date.now());
 
   const [configText, setConfigText] = useState('{}');
   const [configMode, setConfigMode] = useState<'apply' | 'applyAndRestart'>('apply');
@@ -230,7 +535,10 @@ export default function App() {
   const [worldName, setWorldPresetName] = useState('');
   const [worldDescription, setWorldDescription] = useState('');
   const [worldSeedText, setWorldSeedText] = useState('{\n  "seed": ""\n}');
-  const [busyWorldIds, setBusyWorldIds] = useState<Record<string, 'copying' | 'deleting'>>({});
+  const [busyWorldIds, setBusyWorldIds] = useState<Record<string, 'copying' | 'deleting' | 'launching'>>({});
+  const [instanceCreating, setInstanceCreating] = useState(false);
+  const creatingInstanceRef = useRef(false);
+  const launchingWorldKeysRef = useRef<Set<string>>(new Set());
   const [worldRuntimeInfo, setWorldRuntimeInfo] = useState<Record<string, WorldRuntimeInfo>>({});
   const [serverConfigXml, setServerConfigXml] = useState('');
   const [serverConfigKey, setServerConfigKey] = useState('');
@@ -240,9 +548,13 @@ export default function App() {
   const [runtimeWorldJson, setRuntimeWorldJson] = useState('{}');
   const [runtimeServerKey, setRuntimeServerKey] = useState('');
   const [runtimeWorldKey, setRuntimeWorldKey] = useState('');
+  const [windroseJsonFocus, setWindroseJsonFocus] = useState<WindroseJsonFocus | null>(null);
+  const selectedLogInstanceId = selectedInstance ? instanceId(selectedInstance) : '';
 
   const pollRef = useRef<Record<string, number>>({});
   const logStreamRef = useRef<AbortController | null>(null);
+  const runtimeServerEditorRef = useRef<HTMLTextAreaElement | null>(null);
+  const runtimeWorldEditorRef = useRef<HTMLTextAreaElement | null>(null);
 
   const notify = (type: ToastType, message: string) => {
     const id = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -323,7 +635,7 @@ export default function App() {
         const id = instanceId(selectedInstance);
         const next = data.find((candidate) => instanceId(candidate) === id);
         if (next) {
-          setSelectedInstance(next);
+          setSelectedInstance((current) => (current && sameInstanceSnapshot(current, next) ? current : next));
         }
       }
     } catch (error) {
@@ -355,6 +667,14 @@ export default function App() {
     });
   };
 
+  const launchProgressFor = (instance: ServerInstance): LaunchProgress | undefined =>
+    buildLaunchProgress(
+      instance,
+      launchLogLines[instanceId(instance)] ?? [],
+      playerStatuses[instanceId(instance)],
+      launchProgressTick,
+    );
+
   const pollOperation = (id: string, operationId: string) => {
     clearOperationPoll(id);
     setOperations((prev) => ({ ...prev, [id]: { operationId, status: 'QUEUED' } }));
@@ -370,7 +690,7 @@ export default function App() {
           await refreshInstances();
           const latest = await getInstance(id);
           if (latest && selectedInstance && instanceId(selectedInstance) === id) {
-            setSelectedInstance(latest);
+            setSelectedInstance((current) => (current && sameInstanceSnapshot(current, latest) ? current : latest));
           }
         }
       } catch (error) {
@@ -450,6 +770,9 @@ export default function App() {
     if (!selectedInstance) {
       return;
     }
+    if (isWorldConfigPlaceholder(selectedInstance)) {
+      return;
+    }
     const latest = instances.find((instance) => instanceId(instance) === instanceId(selectedInstance));
     if (!latest) {
       setSelectedInstance(null);
@@ -469,6 +792,103 @@ export default function App() {
     }, 5 * 60 * 1000);
     return () => clearInterval(timer);
   }, [user, selectedGameId, instances.length]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setLaunchProgressTick(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    if (!user) {
+      return;
+    }
+
+    let cancelled = false;
+    const pollLaunchProgress = async () => {
+      const now = Date.now();
+      const tracked = instances
+        .filter((instance) => {
+          const startedAt = launchStartedAt(instance);
+          const status = normalizeStatus(instance.status);
+          if (!startedAt || ['stopped', 'terminated', 'error'].includes(status)) {
+            return false;
+          }
+          const ageSeconds = (now - startedAt) / 1000;
+          return (
+            status === 'launching' ||
+            status === 'starting' ||
+            (status === 'running' && ageSeconds < TOTAL_LAUNCH_SECONDS + 600)
+          );
+        })
+        .slice(0, 6);
+
+      if (tracked.length === 0) {
+        return;
+      }
+
+      const results = await Promise.allSettled(
+        tracked.map(async (instance) => {
+          const id = instanceId(instance);
+          const [latest, bootstrap, server] = await Promise.all([
+            getInstance(id),
+            getLogs(id, 'bootstrap', undefined, 120),
+            getLogs(id, 'server', undefined, 120),
+          ]);
+          return [id, latest, [...bootstrap.lines, ...server.lines]] as const;
+        }),
+      );
+
+      if (cancelled) {
+        return;
+      }
+
+      setLaunchLogLines((current) => {
+        const next = { ...current };
+        for (const result of results) {
+          if (result.status === 'fulfilled') {
+            next[result.value[0]] = result.value[2];
+          }
+        }
+        return next;
+      });
+      setInstances((current) =>
+        current.map((instance) => {
+          const result = results.find(
+            (candidate) =>
+              candidate.status === 'fulfilled' &&
+              candidate.value[0] === instanceId(instance) &&
+              candidate.value[1],
+          );
+          return result?.status === 'fulfilled' && result.value[1] ? result.value[1] : instance;
+        }),
+      );
+      setSelectedInstance((current) => {
+        if (!current) {
+          return current;
+        }
+        const result = results.find(
+          (candidate) =>
+            candidate.status === 'fulfilled' &&
+            candidate.value[0] === instanceId(current) &&
+            candidate.value[1],
+        );
+        if (result?.status === 'fulfilled' && result.value[1]) {
+          return sameInstanceSnapshot(current, result.value[1]) ? current : result.value[1];
+        }
+        return current;
+      });
+    };
+
+    void pollLaunchProgress();
+    const timer = window.setInterval(() => {
+      void pollLaunchProgress();
+    }, 20000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [user, instances]);
 
   useEffect(() => {
     if (!selectedInstance || detailTab !== 'config') {
@@ -512,6 +932,19 @@ export default function App() {
   }, [selectedInstance, detailTab]);
 
   useEffect(() => {
+    if (detailTab !== 'config' || serverConfigLoading || !windroseJsonFocus) {
+      return;
+    }
+    const target =
+      windroseJsonFocus === 'server'
+        ? runtimeServerEditorRef.current
+        : runtimeWorldEditorRef.current;
+    target?.focus();
+    target?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    setWindroseJsonFocus(null);
+  }, [detailTab, serverConfigLoading, windroseJsonFocus]);
+
+  useEffect(() => {
     if (!selectedInstance || (detailTab !== 'bootstrap-logs' && detailTab !== 'server-logs')) {
       return;
     }
@@ -522,7 +955,7 @@ export default function App() {
     const load = async () => {
       setLogsLoading(true);
       try {
-        const response = await getLogs(instanceId(selectedInstance), kind, undefined);
+        const response = await getLogs(selectedLogInstanceId, kind, undefined);
         setLogs(response.lines);
         setLogsNextToken(response.nextToken);
       } catch (error) {
@@ -537,7 +970,7 @@ export default function App() {
       }
     };
     load();
-  }, [selectedInstance, detailTab]);
+  }, [selectedLogInstanceId, detailTab]);
 
   useEffect(() => {
     if (!selectedInstance || (detailTab !== 'bootstrap-logs' && detailTab !== 'server-logs') || !logsAutoRefresh || logsLive) {
@@ -546,9 +979,9 @@ export default function App() {
     const kind: LogType = detailTab === 'bootstrap-logs' ? 'bootstrap' : 'server';
     const timer = window.setInterval(async () => {
       try {
-        const response = await getLogs(instanceId(selectedInstance), kind, undefined);
-        setLogs(response.lines);
-        setLogsNextToken(response.nextToken);
+        const response = await getLogs(selectedLogInstanceId, kind, undefined);
+        setLogs((previous) => (sameStringArray(previous, response.lines) ? previous : response.lines));
+        setLogsNextToken((previous) => (previous === response.nextToken ? previous : response.nextToken));
       } catch (error) {
         if (error instanceof UnauthorizedError) {
           setLogsAutoRefresh(false);
@@ -557,10 +990,10 @@ export default function App() {
           notify('error', error instanceof Error ? error.message : 'Log auto-refresh failed');
         }
       }
-    }, 6000);
+    }, 15000);
 
     return () => clearInterval(timer);
-  }, [selectedInstance, detailTab, logsAutoRefresh, logsLive]);
+  }, [selectedLogInstanceId, detailTab, logsAutoRefresh, logsLive]);
 
   useEffect(() => {
     if (!selectedInstance || (detailTab !== 'bootstrap-logs' && detailTab !== 'server-logs') || !logsLive) {
@@ -572,7 +1005,7 @@ export default function App() {
     logStreamRef.current = controller;
     const run = async () => {
       try {
-        await streamLogs(instanceId(selectedInstance), kind, (line) => {
+        await streamLogs(selectedLogInstanceId, kind, (line) => {
           setLogs((previous) => [...previous, line].slice(-1200));
         }, controller.signal);
       } catch (error) {
@@ -588,7 +1021,7 @@ export default function App() {
       controller.abort();
       logStreamRef.current = null;
     };
-  }, [selectedInstance, detailTab, logsLive]);
+  }, [selectedLogInstanceId, detailTab, logsLive]);
 
   const handleAction = async (instance: ServerInstance, kind: 'start' | 'stop' | 'restart' | 'terminate') => {
     if (isOperationRunning(instance)) {
@@ -634,13 +1067,13 @@ export default function App() {
           : kind === 'stop'
             ? await stopGameServer(id)
             : await restartGameServer(id);
-      notify('info', `7D2D server ${kind} submitted: ${op.operationId}`);
+      notify('info', `${runtimeServerLabel(instance)} server ${kind} submitted: ${op.operationId}`);
       pollOperation(id, op.operationId);
       if (kind !== 'stop') {
         setDetailTab('server-logs');
       }
     } catch (error) {
-      notify('error', error instanceof Error ? error.message : `Unable to ${kind} 7D2D server`);
+      notify('error', error instanceof Error ? error.message : `Unable to ${kind} ${runtimeServerLabel(instance)} server`);
     }
   };
 
@@ -752,6 +1185,7 @@ export default function App() {
   const visibleLogs = logsClearMarker
     ? logs.slice(logs.lastIndexOf(logsClearMarker) >= 0 ? logs.lastIndexOf(logsClearMarker) + 1 : 0)
     : logs;
+  const visibleLogText = useMemo(() => visibleLogs.join('\n'), [visibleLogs]);
 
   const handleOpenAddModal = () => {
     setAddForm({
@@ -837,6 +1271,11 @@ export default function App() {
       notify('error', 'Select a game');
       return;
     }
+    if (creatingInstanceRef.current) {
+      return;
+    }
+    creatingInstanceRef.current = true;
+    setInstanceCreating(true);
     try {
       if (addForm.selectedWorldId && supportsServerConfig(addForm.gameId)) {
         setServerConfigSaving(true);
@@ -851,7 +1290,7 @@ export default function App() {
         selectedWorldId: addForm.selectedWorldId || undefined,
         worldName: addForm.worldName || undefined,
         steamBetaBranch: addForm.steamBetaBranch,
-      });
+      }, `create-instance:${Date.now()}:${Math.random().toString(36).slice(2)}`);
       setInstances((current) => [created, ...current]);
       setShowAddInstance(false);
       notify('success', `Instance ${instanceId(created)} created`);
@@ -864,6 +1303,8 @@ export default function App() {
       }
     } finally {
       setServerConfigSaving(false);
+      setInstanceCreating(false);
+      creatingInstanceRef.current = false;
     }
   };
 
@@ -873,6 +1314,12 @@ export default function App() {
       notify('error', 'World is missing a game id or world id');
       return;
     }
+    const launchKey = `${gameId}:${world.worldId}`;
+    if (launchingWorldKeysRef.current.has(launchKey)) {
+      return;
+    }
+    launchingWorldKeysRef.current.add(launchKey);
+    setBusyWorldIds((current) => ({ ...current, [launchKey]: 'launching' }));
     try {
       const availableProfiles =
         profiles.some((profile) => profile.gameId === gameId)
@@ -890,7 +1337,7 @@ export default function App() {
         selectedWorldId: world.worldId,
         worldName: world.name,
         steamBetaBranch: 'latest_experimental',
-      });
+      }, `launch-world:${launchKey}:${Date.now()}:${Math.random().toString(36).slice(2)}`);
       setInstances((current) => [created, ...current]);
       setSelectedInstance(created);
       setDetailTab('bootstrap-logs');
@@ -898,6 +1345,13 @@ export default function App() {
       await refreshInstances(selectedGameId === 'all' ? undefined : selectedGameId);
     } catch (error) {
       notify('error', error instanceof Error ? error.message : 'Unable to launch world');
+    } finally {
+      launchingWorldKeysRef.current.delete(launchKey);
+      setBusyWorldIds((current) => {
+        const next = { ...current };
+        delete next[launchKey];
+        return next;
+      });
     }
   };
 
@@ -962,7 +1416,7 @@ export default function App() {
     }
   };
 
-  const setWorldBusy = (world: WorldPreset, value?: 'copying' | 'deleting') => {
+  const setWorldBusy = (world: WorldPreset, value?: 'copying' | 'deleting' | 'launching') => {
     const key = worldKey(world);
     setBusyWorldIds((current) => {
       const next = { ...current };
@@ -975,7 +1429,7 @@ export default function App() {
     });
   };
 
-  const worldBusyState = (world: WorldPreset): 'copying' | 'deleting' | undefined => {
+  const worldBusyState = (world: WorldPreset): 'copying' | 'deleting' | 'launching' | undefined => {
     return busyWorldIds[worldKey(world)];
   };
 
@@ -1047,6 +1501,29 @@ export default function App() {
     } catch {
       notify('error', 'Unable to copy invite code');
     }
+  };
+
+  const handleEditWindroseRuntimeJson = (
+    world: WorldPreset,
+    section: WindroseJsonFocus,
+    runtime?: WorldRuntimeState,
+  ) => {
+    const gameId = worldGameId(world);
+    if (!gameId || !world.worldId) {
+      notify('error', 'World is missing a game id or world id');
+      return;
+    }
+    const editorInstance =
+      runtime?.instance ?? ({
+        id: `world-config:${gameId}:${world.worldId}`,
+        gameId,
+        selectedWorldId: world.worldId,
+        worldName: world.name,
+        status: 'offline',
+      } as ServerInstance);
+    setSelectedInstance(editorInstance);
+    setDetailTab('config');
+    setWindroseJsonFocus(section);
   };
 
   const handleSignOut = async () => {
@@ -1214,9 +1691,14 @@ export default function App() {
                     const runtime = worldRuntimeState(world);
                     const active = runtime.status !== 'offline';
                     const status = runtime.instance ? playerStatuses[instanceId(runtime.instance)] : undefined;
+                    const launchProgress = runtime.instance ? launchProgressFor(runtime.instance) : undefined;
                     const busy = worldBusyState(world);
                     const runtimeInfo = worldRuntimeInfo[worldKey(world)];
                     const inviteCode = runtimeInfo?.inviteCode;
+                    const monitorUrl =
+                      worldGameId(world).toLowerCase() === 'windrose'
+                        ? windroseMonitorUrl(runtime.publicIp)
+                        : undefined;
                     return (
                       <article className="world-card" key={world.worldId}>
                         <div className="world-card-head">
@@ -1226,6 +1708,7 @@ export default function App() {
                           </div>
                           <span className={statusClassName(runtime.status)}>{runtime.status}</span>
                         </div>
+                        {launchProgress && <LaunchProgressView progress={launchProgress} />}
                         <div className="world-meta">
                           <span>Bucket</span>
                           <strong>{worldBucket(world, profiles)}</strong>
@@ -1254,9 +1737,27 @@ export default function App() {
                               <span>Difficulty</span>
                               <strong>{runtimeInfo?.combatDifficulty || '—'}</strong>
                               <span>Server JSON</span>
-                              <strong>{runtimeInfo?.serverDescriptionKey || 'Not backed up yet'}</strong>
+                              <strong className="json-key-action">
+                                <span>{runtimeInfo?.serverDescriptionKey || 'Not backed up yet'}</span>
+                                <button
+                                  type="button"
+                                  className="link-button"
+                                  onClick={() => handleEditWindroseRuntimeJson(world, 'server', runtime)}
+                                >
+                                  Edit
+                                </button>
+                              </strong>
                               <span>World JSON</span>
-                              <strong>{runtimeInfo?.worldDescriptionKey || 'Not backed up yet'}</strong>
+                              <strong className="json-key-action">
+                                <span>{runtimeInfo?.worldDescriptionKey || 'Not backed up yet'}</span>
+                                <button
+                                  type="button"
+                                  className="link-button"
+                                  onClick={() => handleEditWindroseRuntimeJson(world, 'world', runtime)}
+                                >
+                                  Edit
+                                </button>
+                              </strong>
                             </>
                           )}
                         </div>
@@ -1264,10 +1765,10 @@ export default function App() {
                           <button
                             type="button"
                             className="btn btn-success"
-                            disabled={active}
+                            disabled={active || busy === 'launching'}
                             onClick={() => handleConfigureWorldLaunch(world)}
                           >
-                            Configure & launch
+                            {busy === 'launching' ? 'Launching...' : 'Configure & launch'}
                           </button>
                           {runtime.instance && (
                             <button
@@ -1297,6 +1798,16 @@ export default function App() {
                             >
                               Copy invite
                             </button>
+                          )}
+                          {monitorUrl && (
+                            <a
+                              className="btn btn-small"
+                              href={monitorUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              Monitor
+                            </a>
                           )}
                           <button
                             type="button"
@@ -1357,6 +1868,7 @@ export default function App() {
                   {visibleInstances.map((instance) => {
                     const id = instanceId(instance);
                     const disabled = isOperationRunning(instance);
+                    const launchProgress = launchProgressFor(instance);
                     return (
                       <tr key={id}>
                         <td>{gameName(instance)}</td>
@@ -1365,6 +1877,7 @@ export default function App() {
                         <td>{instance.worldName || instance.selectedWorldId || '—'}</td>
                         <td>
                           <span className={statusClassName(instance.status)}>{normalizeStatus(instance.status)}</span>
+                          {launchProgress && <LaunchProgressView progress={launchProgress} compact />}
                         </td>
                         <td>{instance.region || '—'}</td>
                         <td>{instance.publicIp || '—'}</td>
@@ -1539,27 +2052,42 @@ export default function App() {
                       <span>Selected world</span>
                       <strong>{selectedInstance.worldName || selectedInstance.selectedWorldId || '—'}</strong>
                     </div>
+                    {launchProgressFor(selectedInstance) && (
+                      <div className="overview-wide">
+                        <LaunchProgressView progress={launchProgressFor(selectedInstance)!} />
+                      </div>
+                    )}
                     <div className="row-actions actions">
+                      {supportsRuntimeJsonConfig(instanceGameId(selectedInstance)) && windroseMonitorUrl(selectedInstance.publicIp) && (
+                        <a
+                          className="btn btn-small"
+                          href={windroseMonitorUrl(selectedInstance.publicIp)}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          Monitor
+                        </a>
+                      )}
                       <button
                         className="btn btn-small btn-success"
                         disabled={isOperationRunning(selectedInstance)}
                         onClick={() => handleServerAction(selectedInstance, 'start')}
                       >
-                        Start 7D2D
+                        Start {runtimeServerLabel(selectedInstance)}
                       </button>
                       <button
                         className="btn btn-small"
                         disabled={isOperationRunning(selectedInstance)}
                         onClick={() => handleServerAction(selectedInstance, 'stop')}
                       >
-                        Stop 7D2D
+                        Stop {runtimeServerLabel(selectedInstance)}
                       </button>
                       <button
                         className="btn btn-small"
                         disabled={isOperationRunning(selectedInstance)}
                         onClick={() => handleServerAction(selectedInstance, 'restart')}
                       >
-                        Restart 7D2D
+                        Restart {runtimeServerLabel(selectedInstance)}
                       </button>
                     </div>
                     <div className="row-actions actions">
@@ -1618,9 +2146,10 @@ export default function App() {
                       <button type="button" className="btn btn-small" onClick={handleClearLogsView} disabled={logs.length === 0}>
                         Clear view
                       </button>
+                      {logsLoading && logs.length > 0 && <span className="log-filter-note">Refreshing…</span>}
                       {logsClearMarker && <span className="log-filter-note">Showing new lines only</span>}
                     </div>
-                    <pre className="log-output">{logsLoading ? 'Loading logs…' : visibleLogs.join('\n') || 'No log lines.'}</pre>
+                    <pre className="log-output">{visibleLogText || (logsLoading ? 'Loading logs…' : 'No log lines.')}</pre>
                   </div>
                 )}
 
@@ -1697,6 +2226,7 @@ export default function App() {
                           ServerDescription.json
                           {runtimeServerKey && <small className="field-hint">S3: {runtimeServerKey}</small>}
                           <textarea
+                            ref={runtimeServerEditorRef}
                             value={serverConfigLoading ? 'Loading ServerDescription.json…' : runtimeServerJson}
                             onChange={(event) => setRuntimeServerJson(event.target.value)}
                             className="json-editor"
@@ -1708,6 +2238,7 @@ export default function App() {
                           WorldDescription.json
                           {runtimeWorldKey && <small className="field-hint">S3: {runtimeWorldKey}</small>}
                           <textarea
+                            ref={runtimeWorldEditorRef}
                             value={serverConfigLoading ? 'Loading WorldDescription.json…' : runtimeWorldJson}
                             onChange={(event) => setRuntimeWorldJson(event.target.value)}
                             className="json-editor"
@@ -1929,9 +2460,13 @@ export default function App() {
                 type="button"
                 className="btn btn-success"
                 onClick={handleCreateInstance}
-                disabled={serverConfigLoading || serverConfigSaving}
+                disabled={serverConfigLoading || serverConfigSaving || instanceCreating}
               >
-                {serverConfigSaving ? 'Saving config…' : supportsServerConfig(addForm.gameId) ? 'Save config & launch' : 'Launch'}
+                {serverConfigSaving
+                  ? 'Saving config...'
+                  : instanceCreating
+                    ? 'Launching...'
+                    : supportsServerConfig(addForm.gameId) ? 'Save config & launch' : 'Launch'}
               </button>
             </div>
           </div>

@@ -85,6 +85,7 @@ export interface ServerInstance {
   region?: string;
   publicIp?: string;
   startedAt?: string;
+  createdAt?: string;
   [key: string]: unknown;
 }
 

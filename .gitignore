@@ -1,5 +1,8 @@
 # Local runtime artifacts
 .DS_Store
+.codex-temp/
+*.zip
+*.tsbuildinfo
 scripts/.game-spot/*.state
 
 # Dependencies

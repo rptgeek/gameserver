@@ -3,6 +3,7 @@ import { NextFunction, Request, Response, Router } from "express";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { gzipSync } from "node:zlib";
+import { ConditionalCheckFailedException } from "@aws-sdk/client-dynamodb";
 import {
   DescribeImagesCommand,
   DescribeInstancesCommand,
@@ -12,12 +13,15 @@ import {
   RunInstancesCommand,
   StartInstancesCommand,
   TerminateInstancesCommand,
+  VolumeType,
+  _InstanceType,
 } from "@aws-sdk/client-ec2";
 import {
   GetCommandInvocationCommand,
   GetParameterCommand,
   SendCommandCommand,
 } from "@aws-sdk/client-ssm";
+import { UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import {
   CopyObjectCommand,
   DeleteObjectsCommand,
@@ -84,6 +88,30 @@ const idempotencyRepository = new BaseRepository<IdempotencyLookupItem>(
 );
 
 type AuthenticatedRequest = Request & { user: UserContext };
+
+const MANAGED_BY_TAG = "7d2d-console";
+const BAKED_AMI_ROLE = "game-server";
+const WINDROSE_DOCKER_IMAGE = "windroseserver/windroseserver:latest";
+const WINDROSE_BOOTSTRAP_SCHEMA_VERSION = "2026-07-28-fast-ami-v1";
+const WINDROSE_MONITOR_PATCH_VERSION = "2026-07-27-source-footer-v1";
+const DEFAULT_SPOT_INSTANCE_FALLBACKS = [
+  "c7i.xlarge",
+  "c7i.2xlarge",
+  "c7i.4xlarge",
+  "c6i.xlarge",
+  "c6i.2xlarge",
+  "c6i.4xlarge",
+  "m7i.xlarge",
+  "m7i.2xlarge",
+  "m7i.4xlarge",
+  "m6i.xlarge",
+  "m6i.2xlarge",
+  "m6i.4xlarge",
+  "r7i.xlarge",
+  "r7i.2xlarge",
+  "r6i.xlarge",
+  "r6i.2xlarge",
+];
 
 const jwksUrl =
   config.auth.userPoolId && config.auth.clientId
@@ -253,6 +281,28 @@ function normalizeBoolean(value: unknown, fallback: boolean): boolean {
   return fallback;
 }
 
+function orderedInstanceTypes(
+  _gameId: string,
+  requestedType: string,
+): string[] {
+  return Array.from(new Set([requestedType, ...DEFAULT_SPOT_INSTANCE_FALLBACKS].filter(Boolean)));
+}
+
+function isSpotCapacityError(error: unknown): boolean {
+  const candidate = error as { name?: unknown; Code?: unknown; code?: unknown; message?: unknown };
+  const code = String(candidate?.name ?? candidate?.Code ?? candidate?.code ?? "");
+  const message = String(candidate?.message ?? "");
+  return [
+    "InsufficientInstanceCapacity",
+    "InsufficientFreeAddressesInSubnet",
+    "Unsupported",
+    "UnsupportedOperation",
+    "InvalidParameterValue",
+    "MaxSpotInstanceCountExceeded",
+  ].some((needle) => code.includes(needle) || message.includes(needle)) ||
+    /capacity|not available|currently unavailable|spot/i.test(message);
+}
+
 async function resolveAmiId(profileAmiId: string | undefined): Promise<string> {
   const amiId = profileAmiId ?? config.ec2.defaultAmiId;
   if (!amiId) {
@@ -288,6 +338,114 @@ async function resolveAmiRootDeviceName(imageId: string): Promise<string> {
     // Fall back to the common Nitro device name if the lookup fails.
   }
   return "/dev/xvda";
+}
+
+type LaunchImageChoice = {
+  imageId: string;
+  amiSource: "profile" | "baked";
+  bakedAmiReason?: string;
+  windroseDeploymentId?: string;
+  builderSourceImageId?: string;
+  shouldBuildBakedAmi?: boolean;
+};
+
+async function windroseDeploymentId(
+  bucket: string,
+  worldPrefix: string,
+): Promise<string | undefined> {
+  const description = parseJsonObject(
+    await getS3ObjectText(bucket, windroseStableServerDescriptionKey(worldPrefix)),
+  );
+  return textField(description, "DeploymentId");
+}
+
+async function findCompatibleWindroseAmi(
+  deploymentId: string,
+): Promise<string | undefined> {
+  const result = await ec2Client.send(
+    new DescribeImagesCommand({
+      Owners: ["self"],
+      Filters: [
+        { Name: "state", Values: ["available"] },
+        { Name: "tag:ManagedBy", Values: [MANAGED_BY_TAG] },
+        { Name: "tag:GameId", Values: ["windrose"] },
+        { Name: "tag:AmiRole", Values: [BAKED_AMI_ROLE] },
+        { Name: "tag:WindroseDeploymentId", Values: [deploymentId] },
+        { Name: "tag:WindroseDockerImage", Values: [WINDROSE_DOCKER_IMAGE] },
+        { Name: "tag:BootstrapSchemaVersion", Values: [WINDROSE_BOOTSTRAP_SCHEMA_VERSION] },
+        { Name: "tag:MonitorPatchVersion", Values: [WINDROSE_MONITOR_PATCH_VERSION] },
+      ],
+    }),
+  );
+
+  return [...(result.Images ?? [])]
+    .filter((image) => image.ImageId)
+    .sort((a, b) => (b.CreationDate ?? "").localeCompare(a.CreationDate ?? ""))[0]
+    ?.ImageId;
+}
+
+async function findLatestWindroseAmi(): Promise<string | undefined> {
+  const result = await ec2Client.send(
+    new DescribeImagesCommand({
+      Owners: ["self"],
+      Filters: [
+        { Name: "state", Values: ["available"] },
+        { Name: "tag:ManagedBy", Values: [MANAGED_BY_TAG] },
+        { Name: "tag:GameId", Values: ["windrose"] },
+        { Name: "tag:AmiRole", Values: [BAKED_AMI_ROLE] },
+        { Name: "tag:WindroseDockerImage", Values: [WINDROSE_DOCKER_IMAGE] },
+        { Name: "tag:BootstrapSchemaVersion", Values: [WINDROSE_BOOTSTRAP_SCHEMA_VERSION] },
+        { Name: "tag:MonitorPatchVersion", Values: [WINDROSE_MONITOR_PATCH_VERSION] },
+      ],
+    }),
+  );
+
+  return [...(result.Images ?? [])]
+    .filter((image) => image.ImageId)
+    .sort((a, b) => (b.CreationDate ?? "").localeCompare(a.CreationDate ?? ""))[0]
+    ?.ImageId;
+}
+
+async function resolveLaunchImageChoice(
+  explicitAmiId: string | undefined,
+  profileAmiId: string | undefined,
+  gameId: string,
+  worldBucket: string,
+  worldPrefix: string,
+): Promise<LaunchImageChoice> {
+  const fallbackImageId = await resolveAmiId(explicitAmiId ?? profileAmiId);
+  if (explicitAmiId || gameId !== "windrose") {
+    return { imageId: fallbackImageId, amiSource: "profile" };
+  }
+
+  const deploymentId = await windroseDeploymentId(worldBucket, worldPrefix);
+  if (!deploymentId) {
+    return {
+      imageId: fallbackImageId,
+      amiSource: "profile",
+      bakedAmiReason: "missing-windrose-deployment-id",
+    };
+  }
+
+  const bakedImageId = await findCompatibleWindroseAmi(deploymentId);
+  if (!bakedImageId) {
+    const latestBakedImageId = await findLatestWindroseAmi();
+    return {
+      imageId: fallbackImageId,
+      amiSource: "profile",
+      bakedAmiReason: "no-compatible-baked-ami",
+      windroseDeploymentId: deploymentId,
+      builderSourceImageId: latestBakedImageId ?? fallbackImageId,
+      shouldBuildBakedAmi: true,
+    };
+  }
+
+  return {
+    imageId: bakedImageId,
+    amiSource: "baked",
+    bakedAmiReason: "compatible-baked-ami",
+    windroseDeploymentId: deploymentId,
+  };
 }
 
 function parseSubnets(profileSubnetIds: string[] = [], specSubnetIds: string[] = [], fallback?: string): string[] {
@@ -399,6 +557,14 @@ async function resolveSpotLaunchChoice(
   instanceType: string,
   bumpPercent: number,
 ): Promise<{ subnetId: string; availabilityZone: string; maxPrice?: string }> {
+  return (await resolveSpotLaunchCandidates(subnetIds, instanceType, bumpPercent))[0];
+}
+
+async function resolveSpotLaunchCandidates(
+  subnetIds: string[],
+  instanceType: string,
+  bumpPercent: number,
+): Promise<{ subnetId: string; availabilityZone: string; maxPrice?: string }[]> {
   const subnetZoneMap = await resolveSubnetZoneMap(subnetIds);
   const candidates = subnetIds
     .map((subnetId) => ({ subnetId, availabilityZone: subnetZoneMap[subnetId] }))
@@ -408,17 +574,17 @@ async function resolveSpotLaunchChoice(
     throw new Error("No usable subnet/az pair was found for launch");
   }
 
-  let best: {
+  const priced: {
     subnetId: string;
     availabilityZone: string;
     basePrice: number;
     maxPrice?: string;
-  } | undefined;
+  }[] = [];
 
   for (const candidate of candidates) {
     const response = await ec2Client.send(
       new DescribeSpotPriceHistoryCommand({
-        InstanceTypes: [instanceType],
+        InstanceTypes: [instanceType as _InstanceType],
         ProductDescriptions: ["Linux/UNIX"],
         AvailabilityZone: candidate.availabilityZone,
         MaxResults: 1,
@@ -431,29 +597,23 @@ async function resolveSpotLaunchChoice(
     }
     const maxPrice = (rawPrice * (1 + bumpPercent / 100)).toFixed(6);
 
-    if (!best || rawPrice < best.basePrice) {
-      best = {
-        subnetId: candidate.subnetId,
-        availabilityZone: candidate.availabilityZone,
-        basePrice: rawPrice,
-        maxPrice,
-      };
-    }
+    priced.push({
+      subnetId: candidate.subnetId,
+      availabilityZone: candidate.availabilityZone,
+      basePrice: rawPrice,
+      maxPrice,
+    });
   }
 
-  if (!best) {
-    const firstCandidate = candidates[0];
-    return {
-      subnetId: firstCandidate.subnetId,
-      availabilityZone: firstCandidate.availabilityZone,
-    };
-  }
+  if (priced.length === 0) return candidates;
 
-  return {
-    subnetId: best.subnetId,
-    availabilityZone: best.availabilityZone,
-    maxPrice: best.maxPrice,
-  };
+  return priced
+    .sort((a, b) => a.basePrice - b.basePrice)
+    .map(({ subnetId, availabilityZone, maxPrice }) => ({
+      subnetId,
+      availabilityZone,
+      maxPrice,
+    }));
 }
 
 function renderBootstrapTemplate(profile: GameProfileItem, worldPrefix: string, gameId: string): string {
@@ -487,6 +647,9 @@ function renderBootstrapTemplate(profile: GameProfileItem, worldPrefix: string, 
     SERVER_NAME: shellSingleQuote(`${profile.gameName || gameId}-spot-${randomUUID().slice(0, 6)}`),
     ENFORCE_BOOTSTRAP_LOG_PREFIX: shellSingleQuote(config.logs.bootstrapPrefix),
     ENFORCE_SERVER_LOG_PREFIX: shellSingleQuote(config.logs.serverPrefix),
+    AMI_BUILDER_MODE: shellSingleQuote(profile.profileEnv?.AMI_BUILDER_MODE || "0"),
+    AMI_BUILDER_TARGET_DEPLOYMENT_ID: shellSingleQuote(profile.profileEnv?.AMI_BUILDER_TARGET_DEPLOYMENT_ID || ""),
+    AMI_BUILDER_SOURCE_IMAGE_ID: shellSingleQuote(profile.profileEnv?.AMI_BUILDER_SOURCE_IMAGE_ID || ""),
     WORLD_ID: shellSingleQuote(worldPrefix),
   };
 
@@ -506,6 +669,115 @@ function encodeUserData(script: string): string {
     "",
   ].join("\n");
   return Buffer.from(wrapper, "utf8").toString("base64");
+}
+
+async function hasActiveWindroseAmiBuilder(deploymentId: string): Promise<boolean> {
+  const response = await ec2Client.send(
+    new DescribeInstancesCommand({
+      Filters: [
+        { Name: "instance-state-name", Values: ["pending", "running", "stopping"] },
+        { Name: "tag:ManagedBy", Values: [MANAGED_BY_TAG] },
+        { Name: "tag:GameId", Values: ["windrose"] },
+        { Name: "tag:AmiRole", Values: ["builder"] },
+        { Name: "tag:WindroseDeploymentId", Values: [deploymentId] },
+      ],
+    }),
+  );
+
+  return (response.Reservations ?? []).some((reservation) =>
+    (reservation.Instances ?? []).some((instance) => Boolean(instance.InstanceId)),
+  );
+}
+
+async function launchWindroseAmiBuilderIfNeeded(args: {
+  launchImage: LaunchImageChoice;
+  profile: GameProfileItem;
+  worldPrefix: string;
+  worldBucket: string;
+  subnetId: string;
+  securityGroupIds: string[];
+  keyName: string;
+  instanceProfileName: string;
+  requestedInstanceType: string;
+}): Promise<void> {
+  const deploymentId = args.launchImage.windroseDeploymentId;
+  const sourceImageId = args.launchImage.builderSourceImageId;
+  if (
+    !args.launchImage.shouldBuildBakedAmi ||
+    args.launchImage.amiSource === "baked" ||
+    !deploymentId ||
+    !sourceImageId
+  ) {
+    return;
+  }
+
+  if (await hasActiveWindroseAmiBuilder(deploymentId)) {
+    return;
+  }
+
+  const rootDeviceName = await resolveAmiRootDeviceName(sourceImageId);
+  const builderProfile: GameProfileItem = {
+    ...args.profile,
+    worldBucket: args.worldBucket,
+    worldBucketRegion: args.profile.worldBucketRegion || config.awsRegion,
+    gameName: args.profile.gameName || "windrose",
+    gameHome: args.profile.gameHome || "/opt/windrose",
+    gameStateDirPath: args.profile.gameStateDirPath || "/srv/windrose-state",
+    profileEnv: {
+      ...(args.profile.profileEnv ?? {}),
+      AMI_BUILDER_MODE: "1",
+      AMI_BUILDER_TARGET_DEPLOYMENT_ID: deploymentId,
+      AMI_BUILDER_SOURCE_IMAGE_ID: sourceImageId,
+    },
+  };
+  const userData = encodeUserData(renderBootstrapTemplate(builderProfile, args.worldPrefix, "windrose"));
+  const builderName = `Windrose AMI Builder ${deploymentId}`.slice(0, 255);
+
+  await ec2Client.send(
+    new RunInstancesCommand({
+      ImageId: sourceImageId,
+      InstanceType: args.requestedInstanceType as _InstanceType,
+      MinCount: 1,
+      MaxCount: 1,
+      KeyName: args.keyName,
+      IamInstanceProfile: { Name: args.instanceProfileName },
+      NetworkInterfaces: [
+        {
+          DeviceIndex: 0,
+          SubnetId: args.subnetId,
+          AssociatePublicIpAddress: true,
+          Groups: args.securityGroupIds,
+        },
+      ],
+      BlockDeviceMappings: [
+        {
+          DeviceName: rootDeviceName,
+          Ebs: {
+            VolumeSize: asPositiveInt(args.profile.volumeSizeGiB, 80),
+            VolumeType: VolumeType.gp3,
+            Encrypted: true,
+            DeleteOnTermination: true,
+          },
+        },
+      ],
+      InstanceInitiatedShutdownBehavior: "terminate",
+      UserData: userData,
+      TagSpecifications: [
+        {
+          ResourceType: "instance",
+          Tags: [
+            { Key: "Name", Value: builderName },
+            { Key: "ManagedBy", Value: MANAGED_BY_TAG },
+            { Key: "GameId", Value: "windrose" },
+            { Key: "AmiRole", Value: "builder" },
+            { Key: "WindroseDeploymentId", Value: deploymentId },
+            { Key: "SourceImageId", Value: sourceImageId },
+            { Key: "WorldPrefix", Value: args.worldPrefix },
+          ],
+        },
+      ],
+    }),
+  );
 }
 
 function bootstrapTemplate(): string {
@@ -679,6 +951,15 @@ function recordGameId(record: {
 
 function routeParam(value: string | string[] | undefined): string {
   return Array.isArray(value) ? value[0] ?? "" : value ?? "";
+}
+
+function queryParam(value: unknown): string | undefined {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    const first = value[0];
+    return typeof first === "string" ? first : undefined;
+  }
+  return undefined;
 }
 
 function instanceStateText(instance: InstanceItem): string {
@@ -967,8 +1248,13 @@ function isGameServerAction(value: unknown): value is GameServerAction {
   return value === "server-start" || value === "server-stop" || value === "server-restart";
 }
 
-function gameServerActionCommands(action: GameServerAction): string[] {
-  const service = "7d2d-server";
+function gameServerServiceName(instance: InstanceItem | null): string {
+  const gameId = instance?.gameId ?? "";
+  const service = gameId === "windrose" ? "windrose" : "7d2d";
+  return `${service}-server`;
+}
+
+function gameServerActionCommands(action: GameServerAction, service: string): string[] {
   if (action === "server-start") {
     return [
       `sudo systemctl start ${service}`,
@@ -1042,18 +1328,21 @@ async function executeGameServerAction(
   if (replay) return operation;
 
   try {
+    const instance = await instanceRepository.get(instanceId);
+    const service = gameServerServiceName(instance);
     const command = await ssmClient.send(
       new SendCommandCommand({
         InstanceIds: [instanceId],
         DocumentName: "AWS-RunShellScript",
         Comment: `game-server:${action}`,
-        Parameters: { commands: gameServerActionCommands(action) },
+        Parameters: { commands: gameServerActionCommands(action, service) },
       }),
     );
     return saveOperation(operation, {
       commandId: command.Command?.CommandId,
       commandDocument: "AWS-RunShellScript",
       status: "running",
+      payload: { ...operation.payload, service },
     });
   } catch (error) {
     return saveOperation(operation, {
@@ -1105,7 +1394,7 @@ async function lookupOperationByIdempotency(
   if (!key) return undefined;
   const mapping = await idempotencyRepository.get(idempotencyPk(key));
   if (!mapping?.operationId) return undefined;
-  return operationRepository.get(operationPk(mapping.operationId));
+  return (await operationRepository.get(operationPk(mapping.operationId))) ?? undefined;
 }
 
 function expectedEc2State(action: OperationItem["action"]): string | undefined {
@@ -1121,7 +1410,16 @@ type Ec2InstanceSnapshot = {
   publicIp?: string;
   privateIp?: string;
   startedAt?: string;
+  notFound?: boolean;
 };
+
+function isEc2InstanceNotFoundError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const candidate = error as { name?: unknown; Code?: unknown; code?: unknown };
+  return [candidate.name, candidate.Code, candidate.code].some(
+    (value) => value === "InvalidInstanceID.NotFound",
+  );
+}
 
 async function describeEc2InstanceSnapshot(instanceId: string): Promise<Ec2InstanceSnapshot | undefined> {
   try {
@@ -1136,13 +1434,18 @@ async function describeEc2InstanceSnapshot(instanceId: string): Promise<Ec2Insta
       privateIp: instance.PrivateIpAddress,
       startedAt: instance.LaunchTime?.toISOString(),
     };
-  } catch {
+  } catch (error) {
+    if (isEc2InstanceNotFoundError(error)) {
+      return { ec2State: "terminated", notFound: true };
+    }
     return undefined;
   }
 }
 
 async function refreshEc2State(instanceId: string): Promise<string | undefined> {
-  return (await describeEc2InstanceSnapshot(instanceId))?.ec2State;
+  const snapshot = await describeEc2InstanceSnapshot(instanceId);
+  if (snapshot?.notFound) return undefined;
+  return snapshot?.ec2State;
 }
 
 function shouldRefreshInstanceFromEc2(instance: InstanceItem): boolean {
@@ -1212,6 +1515,64 @@ async function hydrateInstanceFromEc2(instance: InstanceItem): Promise<InstanceI
   }
 
   return normalizedNext;
+}
+
+async function acquireWorldLaunchLock(
+  world: WorldPresetItem,
+  gameId: string,
+  lockId: string,
+): Promise<boolean> {
+  const now = new Date().toISOString();
+  try {
+    await ddbClient.send(
+      new UpdateCommand({
+        TableName: config.tables.games,
+        Key: { pk: world.pk },
+        UpdateExpression:
+          "SET currentInstanceId = :lockId, currentInstanceGameId = :gameId, lockedAt = :now, updatedAt = :now",
+        ConditionExpression:
+          "attribute_not_exists(currentInstanceId) OR currentInstanceId = :empty",
+        ExpressionAttributeValues: {
+          ":lockId": lockId,
+          ":gameId": gameId,
+          ":now": now,
+          ":empty": "",
+        },
+      }),
+    );
+    return true;
+  } catch (error: unknown) {
+    if (error instanceof ConditionalCheckFailedException) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+async function releaseWorldLaunchLock(
+  world: WorldPresetItem,
+  lockId: string,
+): Promise<void> {
+  try {
+    await ddbClient.send(
+      new UpdateCommand({
+        TableName: config.tables.games,
+        Key: { pk: world.pk },
+        UpdateExpression:
+          "SET updatedAt = :now REMOVE currentInstanceId, currentInstanceGameId, lockedAt",
+        ConditionExpression: "currentInstanceId = :lockId",
+        ExpressionAttributeValues: {
+          ":lockId": lockId,
+          ":now": new Date().toISOString(),
+        },
+      }),
+    );
+  } catch (error: unknown) {
+    if (error instanceof ConditionalCheckFailedException) {
+      return;
+    }
+    throw error;
+  }
 }
 
 async function createOperation(
@@ -1374,9 +1735,9 @@ async function createInstancesForSpec(
   let selectedProfile: GameProfileItem | undefined;
   const resolvedProfileId = spec.selectedProfileId?.trim();
   if (spec.selectedProfileId) {
-    selectedProfile = await gameProfilesRepository.get(
-      profilePk(gameId, resolvedProfileId),
-    );
+    selectedProfile =
+      (await gameProfilesRepository.get(profilePk(gameId, resolvedProfileId ?? ""))) ??
+      undefined;
     if (!selectedProfile) {
       const fallback = allProfiles.find(
         (candidate) => candidate.profileId === resolvedProfileId,
@@ -1408,9 +1769,9 @@ async function createInstancesForSpec(
 
   let selectedWorld: WorldPresetItem | undefined;
   if (spec.selectedWorldId) {
-    selectedWorld = await worldPresetsRepository.get(
-      worldPk(gameId, spec.selectedWorldId),
-    );
+    selectedWorld =
+      (await worldPresetsRepository.get(worldPk(gameId, spec.selectedWorldId))) ??
+      undefined;
     if (!selectedWorld) {
       const fallback = (await worldPresetsRepository.scanByPrefix("pk", `game-world#${gameId}#`))
         .find((candidate) => candidate.worldId === spec.selectedWorldId);
@@ -1432,6 +1793,11 @@ async function createInstancesForSpec(
   };
 
   if (selectedWorld?.currentInstanceId) {
+    if (selectedWorld.currentInstanceId.startsWith("launching:")) {
+      throw new Error(
+        `World ${selectedWorld.worldId} is already launching an active server`,
+      );
+    }
     const lockedInstance = await instanceRepository.get(selectedWorld.currentInstanceId);
     const busyState = lockedInstance?.ec2State;
     if (lockedInstance && busyState && !isTerminalInstanceState(busyState)) {
@@ -1450,6 +1816,21 @@ async function createInstancesForSpec(
     }
   }
 
+  const worldLaunchLockId = selectedWorld ? `launching:${randomUUID()}` : undefined;
+  let worldLaunchLockAcquired = false;
+  if (selectedWorld && worldLaunchLockId) {
+    worldLaunchLockAcquired = await acquireWorldLaunchLock(
+      selectedWorld,
+      gameId,
+      worldLaunchLockId,
+    );
+    if (!worldLaunchLockAcquired) {
+      throw new Error(
+        `World ${selectedWorld.worldId} is already launching or running an active server`,
+      );
+    }
+  }
+
   const subnetIds = parseSubnets(
     selectedProfile?.subnetIds,
     spec.subnetIds ?? (spec.subnetId ? [spec.subnetId] : []),
@@ -1464,8 +1845,7 @@ async function createInstancesForSpec(
     profile.instanceType ??
     profile.defaultInstanceType ??
     config.ec2.defaultInstanceType;
-  const imageId = await resolveAmiId(spec.amiId ?? profile.amiId);
-  const rootDeviceName = await resolveAmiRootDeviceName(imageId);
+  const instanceTypeCandidates = orderedInstanceTypes(gameId, instanceType);
 
   const securityGroupIds =
     normalizeTextList(spec.securityGroupIds ?? profile.securityGroupIds ?? config.ec2.defaultSecurityGroupIds)
@@ -1487,7 +1867,6 @@ async function createInstancesForSpec(
     profile.spotPriceBumpPercent ?? spec.spotPriceBumpPercent,
     25,
   );
-  const spot = await resolveSpotLaunchChoice(subnetIds, instanceType, spotBumpPercent);
 
   const basePrefix = profile.s3Prefix ?? "servers";
   const basePrefixSafe = basePrefix.replace(/\/+$/, "");
@@ -1498,9 +1877,19 @@ async function createInstancesForSpec(
     worldPrefixToken(spec.worldName ?? "");
   const worldPrefix = canonicalWorldPrefix(basePrefixSafe, gameId, worldSuffix);
   const worldLabel = selectedWorld?.name || spec.worldName || worldSuffix;
+  const worldBucket = profile.worldBucket || "gameserver-state-example";
+  const launchImage = await resolveLaunchImageChoice(
+    spec.amiId,
+    profile.amiId,
+    gameId,
+    worldBucket,
+    worldPrefix,
+  );
+  const imageId = launchImage.imageId;
+  const rootDeviceName = await resolveAmiRootDeviceName(imageId);
 
   const bootstrapProfile = {
-    worldBucket: profile.worldBucket || "gameserver-state-example",
+    worldBucket,
     worldBucketRegion: profile.worldBucketRegion || config.awsRegion,
     worldPrefix,
     s3Prefix: basePrefixSafe,
@@ -1524,7 +1913,7 @@ async function createInstancesForSpec(
 
   const serverName = spec.serverName || spec.worldName || selectedWorld?.name || gameId;
   const bootstrapScript = renderBootstrapTemplate(
-    bootstrapProfile as GameProfileItem,
+    bootstrapProfile as unknown as GameProfileItem,
     worldPrefix,
     gameId,
   );
@@ -1535,7 +1924,7 @@ async function createInstancesForSpec(
       DeviceName: rootDeviceName,
       Ebs: {
         VolumeSize: asPositiveInt(profile.volumeSizeGiB, 80),
-        VolumeType: "gp3",
+        VolumeType: VolumeType.gp3,
         Encrypted: true,
         DeleteOnTermination: true,
       },
@@ -1549,74 +1938,143 @@ async function createInstancesForSpec(
   };
 
   const now = new Date().toISOString();
+  let createdIds: string[] = [];
+  let launchedInstanceType = instanceType;
+  let launchedSpot: Awaited<ReturnType<typeof resolveSpotLaunchChoice>> | undefined;
+  let lastLaunchError: unknown;
+  try {
+    for (const candidateInstanceType of instanceTypeCandidates) {
+      const candidateSpots = await resolveSpotLaunchCandidates(
+        subnetIds,
+        candidateInstanceType,
+        spotBumpPercent,
+      );
+      for (const candidateSpot of candidateSpots) {
+        try {
+          const result = await ec2Client.send(
+            new RunInstancesCommand({
+              ImageId: imageId,
+              InstanceType: candidateInstanceType as _InstanceType,
+              MinCount: count,
+              MaxCount: count,
+              KeyName: keyName,
+              IamInstanceProfile: { Name: instanceProfileName },
+              NetworkInterfaces: [
+                {
+                  DeviceIndex: 0,
+                  SubnetId: candidateSpot.subnetId,
+                  AssociatePublicIpAddress: true,
+                  Groups: securityGroupIds,
+                },
+              ],
+              InstanceMarketOptions: {
+                MarketType: "spot",
+                SpotOptions: {
+                  SpotInstanceType: "one-time",
+                  InstanceInterruptionBehavior: "terminate",
+                  ...(candidateSpot.maxPrice ? { MaxPrice: candidateSpot.maxPrice } : {}),
+                },
+              },
+              BlockDeviceMappings: blockDevices,
+              InstanceInitiatedShutdownBehavior: "terminate",
+              UserData: userData,
+              TagSpecifications: [
+                {
+                  ResourceType: "instance",
+                  Tags: [
+                    { Key: "GameId", Value: spec.gameId },
+                    { Key: "ManagedBy", Value: "7d2d-console" },
+                    { Key: "Name", Value: serverName },
+                    ...(Object.entries(spec.tags || {}).map(([key, value]) => ({ Key: key, Value: value }))),
+                    { Key: "GameProfileId", Value: selectedProfile.profileId },
+                    ...(spec.selectedWorldId
+                      ? [{ Key: "GameWorldId", Value: spec.selectedWorldId }]
+                      : []),
+                    ...(spec.worldName ? [{ Key: "WorldName", Value: spec.worldName }] : []),
+                    { Key: "WorldPrefix", Value: worldPrefix },
+                    { Key: "RequestedInstanceType", Value: instanceType },
+                    { Key: "LaunchedInstanceType", Value: candidateInstanceType },
+                    { Key: "AmiSource", Value: launchImage.amiSource },
+                    ...(launchImage.bakedAmiReason
+                      ? [{ Key: "BakedAmiReason", Value: launchImage.bakedAmiReason }]
+                      : []),
+                    ...(launchImage.windroseDeploymentId
+                      ? [{ Key: "WindroseDeploymentId", Value: launchImage.windroseDeploymentId }]
+                      : []),
+                  ],
+                },
+              ],
+            }),
+          );
+
+          createdIds = (result.Instances ?? [])
+            .map((instance) => instance.InstanceId)
+            .filter((instanceId): instanceId is string => Boolean(instanceId));
+          if (createdIds.length === 0) {
+            throw new Error("No instance ids returned from RunInstances");
+          }
+          launchedInstanceType = candidateInstanceType;
+          launchedSpot = candidateSpot;
+          break;
+        } catch (error) {
+          lastLaunchError = error;
+          if (!isSpotCapacityError(error)) {
+            throw error;
+          }
+        }
+      }
+      if (createdIds.length > 0) {
+        break;
+      }
+    }
+
+    if (createdIds.length === 0) {
+      throw lastLaunchError instanceof Error
+        ? lastLaunchError
+        : new Error("No instance ids returned from RunInstances");
+    }
+  } catch (error) {
+    if (selectedWorld && worldLaunchLockId && worldLaunchLockAcquired) {
+      await releaseWorldLaunchLock(selectedWorld, worldLaunchLockId);
+    }
+    throw error;
+  }
+
+  if (!launchedSpot) {
+    throw new Error("No spot placement was selected for launch");
+  }
+
+  if (gameId === "windrose") {
+    try {
+      await launchWindroseAmiBuilderIfNeeded({
+        launchImage,
+        profile: bootstrapProfile as unknown as GameProfileItem,
+        worldPrefix,
+        worldBucket,
+        subnetId: launchedSpot.subnetId,
+        securityGroupIds,
+        keyName,
+        instanceProfileName,
+        requestedInstanceType: launchedInstanceType,
+      });
+    } catch (error) {
+      console.error("Failed to launch Windrose AMI builder", error);
+    }
+  }
+
   const basePayload = {
-    gameId: spec.gameId,
     region: config.awsRegion,
-    worldBucket: profile.worldBucket || "",
+    worldBucket,
     worldS3Prefix: worldPrefix,
     worldPrefix,
     worldName: spec.worldName,
     worldLabel,
-    availabilityZone: spot.availabilityZone,
-    subnetId: spot.subnetId,
+    availabilityZone: launchedSpot.availabilityZone,
+    subnetId: launchedSpot.subnetId,
     securityGroupIds,
-    spotPriceAtLaunch: spot.maxPrice,
+    spotPriceAtLaunch: launchedSpot.maxPrice,
     serverName,
   };
-
-  const result = await ec2Client.send(
-    new RunInstancesCommand({
-      ImageId: imageId,
-      InstanceType: instanceType,
-      MinCount: count,
-      MaxCount: count,
-      KeyName: keyName,
-      IamInstanceProfile: { Name: instanceProfileName },
-      NetworkInterfaces: [
-        {
-          DeviceIndex: 0,
-          SubnetId: spot.subnetId,
-          AssociatePublicIpAddress: true,
-          Groups: securityGroupIds,
-        },
-      ],
-      InstanceMarketOptions: {
-        MarketType: "spot",
-        SpotOptions: {
-          SpotInstanceType: "one-time",
-          InstanceInterruptionBehavior: "terminate",
-          ...(spot.maxPrice ? { MaxPrice: spot.maxPrice } : {}),
-        },
-      },
-      BlockDeviceMappings: blockDevices,
-      InstanceInitiatedShutdownBehavior: "terminate",
-      UserData: userData,
-      TagSpecifications: [
-        {
-          ResourceType: "instance",
-          Tags: [
-            { Key: "GameId", Value: spec.gameId },
-            { Key: "ManagedBy", Value: "7d2d-console" },
-            { Key: "Name", Value: serverName },
-            ...(Object.entries(spec.tags || {}).map(([key, value]) => ({ Key: key, Value: value }))),
-            { Key: "GameProfileId", Value: selectedProfile.profileId },
-            ...(spec.selectedWorldId
-              ? [{ Key: "GameWorldId", Value: spec.selectedWorldId }]
-              : []),
-            ...(spec.worldName ? [{ Key: "WorldName", Value: spec.worldName }] : []),
-            { Key: "WorldPrefix", Value: worldPrefix },
-          ],
-        },
-      ],
-    }),
-  );
-
-  const createdIds = (result.Instances ?? [])
-    .map((instance) => instance.InstanceId)
-    .filter((instanceId): instanceId is string => Boolean(instanceId));
-  if (createdIds.length === 0) {
-    throw new Error("No instance ids returned from RunInstances");
-  }
   
   for (const instanceId of createdIds) {
     await instanceRepository.put({
@@ -1630,8 +2088,11 @@ async function createInstancesForSpec(
       updatedAt: now,
       ...basePayload,
       amiId: imageId,
-      instanceType,
-      subnetId: spot.subnetId,
+      amiSource: launchImage.amiSource,
+      bakedAmiReason: launchImage.bakedAmiReason,
+      windroseDeploymentId: launchImage.windroseDeploymentId,
+      instanceType: launchedInstanceType,
+      subnetId: launchedSpot.subnetId,
       securityGroupIds,
       tags: { ...(spec.tags ?? {}), gameId: spec.gameId },
       bootstrapProfile: "requested:bootstrap",
@@ -2025,11 +2486,14 @@ export function createRouter(): Router {
         if (!gameId || gamesById.has(gameId)) {
           continue;
         }
+        const now = new Date().toISOString();
         gamesById.set(gameId, {
           pk: gameId,
           gameId,
           kind: "game",
           name: gameId === "7d2d" ? "7D2D" : gameId,
+          createdAt: now,
+          updatedAt: now,
         });
       }
 
@@ -2038,11 +2502,14 @@ export function createRouter(): Router {
         if (!gameId || gamesById.has(gameId)) {
           continue;
         }
+        const now = new Date().toISOString();
         gamesById.set(gameId, {
           pk: gameId,
           gameId,
           kind: "game",
           name: gameId === "7d2d" ? "7D2D" : gameId,
+          createdAt: now,
+          updatedAt: now,
         });
       }
 
@@ -2059,7 +2526,7 @@ export function createRouter(): Router {
   router.get(
     "/v1/games/:gameId/profiles",
     withAsync(async (req, res) => {
-      const { gameId } = req.params;
+      const gameId = routeParam(req.params.gameId);
       const allProfiles = await gameProfilesRepository.scan();
       const profiles = allProfiles
         .filter(
@@ -2076,7 +2543,7 @@ export function createRouter(): Router {
     "/v1/games/:gameId/profiles",
     withAsync(async (req, res) => {
       const authReq = req as AuthenticatedRequest;
-      const { gameId } = req.params;
+      const gameId = routeParam(req.params.gameId);
       const body = req.body as SaveProfileRequest;
       const name = typeof body?.name === "string" ? body.name.trim() : "";
       if (!name) {
@@ -2167,7 +2634,7 @@ export function createRouter(): Router {
   router.get(
     "/v1/games/:gameId/worlds",
     withAsync(async (req, res) => {
-      const { gameId } = req.params;
+      const gameId = routeParam(req.params.gameId);
       const allWorlds = await worldPresetsRepository.scan();
       const worlds = allWorlds
         .filter((world) => hasWorldShape(world) && isGameWorldForGame(world, gameId))
@@ -2181,7 +2648,7 @@ export function createRouter(): Router {
     "/v1/games/:gameId/worlds",
     withAsync(async (req, res) => {
       const authReq = req as AuthenticatedRequest;
-      const { gameId } = req.params;
+      const gameId = routeParam(req.params.gameId);
       const body = req.body as SaveWorldRequest;
       const name = typeof body?.name === "string" ? body.name.trim() : "";
       if (!name) {
@@ -2514,7 +2981,8 @@ export function createRouter(): Router {
   router.get(
     "/v1/games/:gameId/worlds/:worldId/server-config",
     withAsync(async (req, res) => {
-      const { gameId, worldId } = req.params;
+      const gameId = routeParam(req.params.gameId);
+      const worldId = routeParam(req.params.worldId);
       const world = await worldPresetsRepository.get(worldPk(gameId, worldId));
       if (!world || !isGameWorldForGame(world, gameId)) {
         res.status(404).json({ error: "world not found" });
@@ -2550,7 +3018,8 @@ export function createRouter(): Router {
   router.put(
     "/v1/games/:gameId/worlds/:worldId/server-config",
     withAsync(async (req, res) => {
-      const { gameId, worldId } = req.params;
+      const gameId = routeParam(req.params.gameId);
+      const worldId = routeParam(req.params.worldId);
       const body = req.body as { configXml?: unknown };
       const configXml = typeof body?.configXml === "string" ? body.configXml : "";
       if (!configXml.trim()) {
@@ -2593,7 +3062,7 @@ export function createRouter(): Router {
   router.get(
     "/v1/instances",
     withAsync(async (req, res) => {
-      const gameId = req.query.gameId ? String(req.query.gameId) : undefined;
+      const gameId = queryParam(req.query.gameId);
       const instances = gameId
         ? await instanceRepository.scanByField("gameId", gameId)
         : await instanceRepository.scan();
@@ -2605,7 +3074,7 @@ export function createRouter(): Router {
   router.get(
     "/v1/instances/:instanceId",
     withAsync(async (req, res) => {
-      const instanceId = req.params.instanceId;
+      const instanceId = routeParam(req.params.instanceId);
       const instance = await instanceRepository.get(instanceId);
       if (instance) {
         res.json({ instance: await hydrateInstanceFromEc2(instance) });
@@ -2639,7 +3108,7 @@ export function createRouter(): Router {
       const requestBody = (req.body ?? {}) as Record<string, unknown>;
       const specs: InstanceCreateRequest[] = Array.isArray(requestBody.instances)
         ? (requestBody.instances as InstanceCreateRequest[])
-        : [requestBody as InstanceCreateRequest];
+        : [requestBody as unknown as InstanceCreateRequest];
 
       if (specs.length === 0) {
         res.status(400).json({ error: "No instance payload supplied" });
@@ -2727,7 +3196,7 @@ export function createRouter(): Router {
     "/v1/instances/:instanceId/start",
     withAsync(async (req, res) => {
       const authReq = req as AuthenticatedRequest;
-      const operation = await executeInstanceAction(authReq, req.params.instanceId, "start");
+      const operation = await executeInstanceAction(authReq, routeParam(req.params.instanceId), "start");
       res.json(operation);
     }),
   );
@@ -2736,7 +3205,7 @@ export function createRouter(): Router {
     "/v1/instances/:instanceId/stop",
     withAsync(async (req, res) => {
       const authReq = req as AuthenticatedRequest;
-      const operation = await executeInstanceAction(authReq, req.params.instanceId, "stop");
+      const operation = await executeInstanceAction(authReq, routeParam(req.params.instanceId), "stop");
       res.json(operation);
     }),
   );
@@ -2747,7 +3216,7 @@ export function createRouter(): Router {
       const authReq = req as AuthenticatedRequest;
       const operation = await executeInstanceAction(
         authReq,
-        req.params.instanceId,
+        routeParam(req.params.instanceId),
         "restart",
         true,
       );
@@ -2761,7 +3230,7 @@ export function createRouter(): Router {
       const authReq = req as AuthenticatedRequest;
       const operation = await executeInstanceAction(
         authReq,
-        req.params.instanceId,
+        routeParam(req.params.instanceId),
         "reboot",
         false,
       );
@@ -2775,7 +3244,7 @@ export function createRouter(): Router {
       const authReq = req as AuthenticatedRequest;
       const operation = await executeInstanceAction(
         authReq,
-        req.params.instanceId,
+        routeParam(req.params.instanceId),
         "terminate",
         true,
       );
@@ -2787,7 +3256,7 @@ export function createRouter(): Router {
     "/v1/instances/:instanceId/action",
     withAsync(async (req, res) => {
       const authReq = req as AuthenticatedRequest;
-      const instanceId = req.params.instanceId;
+      const instanceId = routeParam(req.params.instanceId);
       const action = req.body?.action;
       if (!isSupportedAction(action)) {
         res.status(400).json({ error: "action must be start|stop|restart|terminate|reboot" });
@@ -2813,7 +3282,7 @@ export function createRouter(): Router {
         res.status(400).json({ error: "action must be server-start|server-stop|server-restart" });
         return;
       }
-      const operation = await executeGameServerAction(authReq, req.params.instanceId, action);
+      const operation = await executeGameServerAction(authReq, routeParam(req.params.instanceId), action);
       res.json(operation);
     }),
   );
@@ -2831,7 +3300,7 @@ export function createRouter(): Router {
         res.status(400).json({ error: "command must be 500 characters or fewer" });
         return;
       }
-      const operation = await executeGameServerCommand(authReq, req.params.instanceId, command);
+      const operation = await executeGameServerCommand(authReq, routeParam(req.params.instanceId), command);
       res.json(operation);
     }),
   );
@@ -2839,7 +3308,7 @@ export function createRouter(): Router {
   router.get(
     "/v1/instances/:instanceId/player-status",
     withAsync(async (req, res) => {
-      const instanceId = req.params.instanceId;
+      const instanceId = routeParam(req.params.instanceId);
       try {
         const response = await logsClient.send(
           new GetLogEventsCommand({
@@ -2878,7 +3347,7 @@ export function createRouter(): Router {
   router.get(
     "/v1/instances/:instanceId/status",
     withAsync(async (req, res) => {
-      const instanceId = req.params.instanceId;
+      const instanceId = routeParam(req.params.instanceId);
       const latest = await latestOperationForInstance(instanceId);
       const ec2State = await refreshEc2State(instanceId);
 
@@ -2896,8 +3365,8 @@ export function createRouter(): Router {
             latestOperation: latest,
             commandStatus: {
               status: invocation.Status,
-              executionStartDate: invocation.ExecutionStartDate?.toISOString(),
-              executionEndDate: invocation.ExecutionEndDate?.toISOString(),
+              executionStartDate: invocation.ExecutionStartDateTime,
+              executionEndDate: invocation.ExecutionEndDateTime,
               responseCode: invocation.ResponseCode,
             },
           });
@@ -2924,11 +3393,11 @@ export function createRouter(): Router {
   router.get(
     "/v1/instances/:instanceId/logs",
     withAsync(async (req, res) => {
-      const instanceId = req.params.instanceId;
+      const instanceId = routeParam(req.params.instanceId);
       const source = normalizeLogSource(req.query.source);
       const limit = asInt(req.query.limit, 100);
       const nextToken =
-        typeof req.query.nextToken === "string" ? req.query.nextToken : undefined;
+        queryParam(req.query.nextToken);
       const payload = await readLogEvents(instanceId, source, nextToken, limit);
       res.json(payload);
     }),
@@ -2937,11 +3406,11 @@ export function createRouter(): Router {
   router.get(
     "/v1/instances/:instanceId/logs/:source",
     withAsync(async (req, res) => {
-      const instanceId = req.params.instanceId;
+      const instanceId = routeParam(req.params.instanceId);
       const source = normalizeLogSource(req.params.source);
       const limit = asInt(req.query.limit, 100);
       const nextToken =
-        typeof req.query.nextToken === "string" ? req.query.nextToken : undefined;
+        queryParam(req.query.nextToken);
       const payload = await readLogEvents(instanceId, source, nextToken, limit);
       res.json(payload);
     }),
@@ -2950,7 +3419,7 @@ export function createRouter(): Router {
   router.post(
     "/v1/instances/:instanceId/logs/stream",
     withAsync(async (req, res) => {
-      const instanceId = req.params.instanceId;
+      const instanceId = routeParam(req.params.instanceId);
       const source = normalizeLogSource(req.body?.source);
       const { logGroupName } = logLocation(instanceId, source);
       const streamName = `${instanceId}-${source}-${Date.now()}`;
@@ -2967,7 +3436,7 @@ export function createRouter(): Router {
   router.get(
     "/v1/instances/:instanceId/config",
     withAsync(async (req, res) => {
-      const instanceId = req.params.instanceId;
+      const instanceId = routeParam(req.params.instanceId);
       const item = await configRepository.get(instanceId);
       if (!item) {
         const instance = await instanceRepository.get(instanceId);
@@ -2991,7 +3460,7 @@ export function createRouter(): Router {
     "/v1/instances/:instanceId/config",
     withAsync(async (req, res) => {
       const authReq = req as AuthenticatedRequest;
-      const instanceId = req.params.instanceId;
+      const instanceId = routeParam(req.params.instanceId);
       const body = req.body as Record<string, unknown>;
       const bootstrapAction =
         body?.action === "bootstrap" || body?.action === "update"
@@ -3065,7 +3534,7 @@ export function createRouter(): Router {
     "/v1/operations/:operationId",
     withAsync(async (req, res) => {
       const operation = await operationRepository.get(
-        operationPk(req.params.operationId),
+        operationPk(routeParam(req.params.operationId)),
       );
       if (!operation) {
         res.status(404).json({ error: "operation not found" });

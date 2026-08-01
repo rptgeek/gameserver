@@ -1,5 +1,3 @@
-import { Instance, InstanceState } from "@aws-sdk/client-ec2";
-
 export interface GameItem {
   pk: string;
   gameId: string;
@@ -92,9 +90,12 @@ export interface InstanceItem {
   pk: string;
   instanceId: string;
   gameId: string;
-  ec2State?: InstanceState;
+  ec2State?: string;
   status?: string;
   availabilityZone?: string;
+  publicIp?: string;
+  privateIp?: string;
+  startedAt?: string;
   spotPriceAtLaunch?: string;
   lastBackupAt?: string;
   serverName?: string;
@@ -105,6 +106,9 @@ export interface InstanceItem {
   createdAt: string;
   updatedAt: string;
   amiId?: string;
+  amiSource?: "profile" | "baked";
+  bakedAmiReason?: string;
+  windroseDeploymentId?: string;
   instanceType?: string;
   subnetId?: string;
   securityGroupIds?: string[];
