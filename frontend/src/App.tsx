@@ -52,7 +52,18 @@ import type {
 
 type DetailTab = 'overview' | 'bootstrap-logs' | 'server-logs' | 'console' | 'config';
 type WindroseJsonFocus = 'server' | 'world';
-type LaunchPhaseKey = 'ec2' | 'bootstrap' | 'files' | 'install' | 'config' | 'game' | 'ready';
+type LaunchPhaseKey =
+  | 'ec2'
+  | 'bootstrap'
+  | 'files'
+  | 'install'
+  | 'config'
+  | 'game'
+  | 'network'
+  | 'world'
+  | 'waiting-account'
+  | 'first-player'
+  | 'ready';
 
 interface LaunchPhaseDefinition {
   key: LaunchPhaseKey;
@@ -61,10 +72,12 @@ interface LaunchPhaseDefinition {
 }
 
 interface LaunchProgress {
+  phases: LaunchPhaseDefinition[];
   phase: LaunchPhaseDefinition;
   phaseIndex: number;
   elapsedSeconds: number;
   remainingSeconds: number;
+  remainingLabel?: string;
   percent: number;
   ready: boolean;
   statusText: string;
@@ -186,6 +199,20 @@ const BAKED_LAUNCH_PHASES: LaunchPhaseDefinition[] = [
   { key: 'ready', label: 'Game ready', estimateSeconds: 0 },
 ];
 
+const WINDROSE_BAKED_LAUNCH_PHASES: LaunchPhaseDefinition[] = [
+  { key: 'ec2', label: 'Launching EC2 server', estimateSeconds: 45 },
+  { key: 'bootstrap', label: 'Bootstrapping host', estimateSeconds: 25 },
+  { key: 'files', label: 'Loading save files', estimateSeconds: 45 },
+  { key: 'install', label: 'Game files ready', estimateSeconds: 10 },
+  { key: 'config', label: 'Updating server config', estimateSeconds: 10 },
+  { key: 'game', label: 'Starting Windrose', estimateSeconds: 80 },
+  { key: 'network', label: 'Opening game port', estimateSeconds: 20 },
+  { key: 'world', label: 'Loading world', estimateSeconds: 25 },
+  { key: 'waiting-account', label: 'Waiting for first player', estimateSeconds: 0 },
+  { key: 'first-player', label: 'Preparing player session', estimateSeconds: 120 },
+  { key: 'ready', label: 'Game ready', estimateSeconds: 0 },
+];
+
 function totalLaunchSeconds(phases: LaunchPhaseDefinition[]): number {
   return phases.reduce(
   (total, phase) => total + phase.estimateSeconds,
@@ -195,7 +222,14 @@ function totalLaunchSeconds(phases: LaunchPhaseDefinition[]): number {
 
 const TOTAL_LAUNCH_SECONDS = totalLaunchSeconds(LAUNCH_PHASES);
 
+function isWindroseInstance(instance: ServerInstance): boolean {
+  return instanceGameId(instance).toLowerCase() === 'windrose';
+}
+
 function launchPhasesFor(instance: ServerInstance): LaunchPhaseDefinition[] {
+  if (isWindroseInstance(instance) && String(instance.amiSource || '').toLowerCase() === 'baked') {
+    return WINDROSE_BAKED_LAUNCH_PHASES;
+  }
   return String(instance.amiSource || '').toLowerCase() === 'baked' ? BAKED_LAUNCH_PHASES : LAUNCH_PHASES;
 }
 
@@ -233,6 +267,7 @@ function phaseIndexForElapsed(phases: LaunchPhaseDefinition[], elapsedSeconds: n
 function phaseMarkerFromLogs(lines: string[]): LaunchPhaseMarker | undefined {
   let current: LaunchPhaseMarker | undefined;
   for (const line of lines) {
+    const lower = line.toLowerCase();
     const match = line.match(/LAUNCH_PHASE\s+phase=([a-z-]+).*?\bat=([^\s]+)/i);
     const marker = (match?.[1] || line.match(/LAUNCH_PHASE\s+phase=([a-z-]+)/i)?.[1])?.toLowerCase();
     if (
@@ -242,14 +277,36 @@ function phaseMarkerFromLogs(lines: string[]): LaunchPhaseMarker | undefined {
       marker === 'install' ||
       marker === 'config' ||
       marker === 'game' ||
+      marker === 'network' ||
+      marker === 'world' ||
+      marker === 'waiting-account' ||
+      marker === 'first-player' ||
       marker === 'ready'
     ) {
       const parsedAt = match?.[2] ? Date.parse(match[2]) : Number.NaN;
-      current = { key: marker, atMs: Number.isNaN(parsedAt) ? undefined : parsedAt };
+      const normalizedMarker =
+        marker === 'ready' && lower.includes('waiting for game readiness')
+          ? 'network'
+          : marker;
+      current = { key: normalizedMarker, atMs: Number.isNaN(parsedAt) ? undefined : parsedAt };
       continue;
     }
-    const lower = line.toLowerCase();
-    if (lower.includes('bootstrap complete')) current = { key: 'ready' };
+    if (lower.includes('ueloggedin') || lower.includes('readytoplay')) current = { key: 'ready' };
+    else if (
+      lower.includes('notifyacceptingconnection') ||
+      lower.includes('login request') ||
+      lower.includes('readyforterraingeneration') ||
+      lower.includes('terraingeneration') ||
+      lower.includes('waitingforbuildingisready') ||
+      lower.includes('waitingforclientisready')
+    ) current = { key: 'first-player' };
+    else if (lower.includes('waitingforfirstaccount')) current = { key: 'waiting-account' };
+    else if (
+      lower.includes('loadmap load map complete /game/maps/gym/genlandia/genlandiamulty') ||
+      lower.includes('bringing world /game/maps/gym/genlandia/genlandiamulty')
+    ) current = { key: 'world' };
+    else if (lower.includes('grpc server started') || lower.includes('ipnetdriver listening on port 7777')) current = { key: 'network' };
+    else if (lower.includes('bootstrap complete')) current = { key: 'network' };
     else if (lower.includes('success! app') && lower.includes('fully installed')) current = { key: 'install' };
     else if (lower.includes(' update state ') || lower.includes('steamcmd') || lower.includes('download complete')) current = { key: 'install' };
     else if (lower.includes('pulling from windroseserver') || lower.includes('downloaded newer image')) current = { key: 'install' };
@@ -300,21 +357,28 @@ function launchStatusFromLogs(lines: string[], endpoint?: string): string | unde
     if (lower.includes('serverdescription.json')) return 'Applying Windrose server configuration';
     if (lower.includes('started windrose player monitor')) return 'Starting player monitor';
     if (lower.includes('started windrose-server') || lower.includes('started windrose server')) return 'Starting Windrose server';
+    if (lower.includes('ueloggedin') || lower.includes('readytoplay')) return endpoint ? `Game ready at ${endpoint}` : 'Game ready';
+    if (lower.includes('waitingforbuildingisready') || lower.includes('waitingforclientisready')) return 'Finalizing first player session';
+    if (lower.includes('readyforterraingeneration') || lower.includes('terraingeneration')) return 'Preparing world for first player';
+    if (lower.includes('notifyacceptingconnection') || lower.includes('login request')) return 'Player connection detected';
+    if (lower.includes('waitingforfirstaccount')) return endpoint ? `Listening at ${endpoint}; waiting for first player` : 'Waiting for first player';
+    if (
+      lower.includes('loadmap load map complete /game/maps/gym/genlandia/genlandiamulty') ||
+      lower.includes('bringing world /game/maps/gym/genlandia/genlandiamulty')
+    ) return 'Loading Windrose world';
+    if (lower.includes('grpc server started') || lower.includes('ipnetdriver listening on port 7777')) return 'Opening Windrose network listener';
   }
 
   return endpoint ? `Waiting for game readiness at ${endpoint}` : undefined;
 }
 
-function gameReadyFromLogs(lines: string[]): boolean {
+function gameReadyFromLogs(lines: string[], windrose: boolean): boolean {
   return lines.some((line) => {
     const lower = line.toLowerCase();
-    return (
-      lower.includes('launch_phase phase=ready') ||
-      lower.includes('bootstrap complete') ||
-      lower.includes('loadmap load map complete /game/maps/gym/genlandia/genlandiamulty') ||
-      lower.includes('bringing world /game/maps/gym/genlandia/genlandiamulty') ||
-      lower.includes('ipnetdriver listening on port 7777')
-    );
+    if (windrose) {
+      return lower.includes('ueloggedin') || lower.includes('readytoplay');
+    }
+    return lower.includes('launch_phase phase=ready') || lower.includes('bootstrap complete');
   });
 }
 
@@ -334,13 +398,17 @@ function buildLaunchProgress(
   const totalSeconds = totalLaunchSeconds(phases);
   const marker = phaseMarkerFromLogs(logLines);
   const markerPhase = marker?.key;
+  const windrose = isWindroseInstance(instance);
   const ready =
     !isTerminal &&
     Boolean(instance.publicIp) &&
-    (Boolean(playerStatus?.serverVersion) || markerPhase === 'ready' || gameReadyFromLogs(logLines));
+    (windrose
+      ? markerPhase === 'ready' || Boolean(playerStatus && playerStatus.playerCount > 0)
+      : Boolean(playerStatus?.serverVersion) || markerPhase === 'ready' || gameReadyFromLogs(logLines, false));
 
   if (ready) {
     return {
+      phases,
       phase: phases[phases.length - 1],
       phaseIndex: phases.length - 1,
       elapsedSeconds,
@@ -374,15 +442,18 @@ function buildLaunchProgress(
   const remainingSeconds = Math.max(0, estimatedRemainingFromPhase);
   const percent = Math.min(98, Math.max(5, (completedEstimate / totalSeconds) * 100));
   const logStatus = launchStatusFromLogs(logLines, endpoint);
+  const waitingForFirstPlayer = phase.key === 'waiting-account';
   const statusText = hasLaunchLogs
     ? logStatus || (endpoint ? `Waiting for game readiness at ${endpoint}` : 'Waiting for public IP')
     : 'Waiting for bootstrap logs';
 
   return {
+    phases,
     phase,
     phaseIndex,
     elapsedSeconds,
     remainingSeconds,
+    remainingLabel: waitingForFirstPlayer ? 'Waiting for player' : undefined,
     percent,
     ready: false,
     statusText,
@@ -401,7 +472,7 @@ function LaunchProgressView({
     <div className={`launch-progress ${compact ? 'compact' : ''} ${progress.ready ? 'ready' : ''}`}>
       <div className="launch-progress-top">
         <strong>{progress.phase.label}</strong>
-        <span>{progress.ready ? 'Ready' : `${formatDuration(progress.remainingSeconds)} left`}</span>
+        <span>{progress.ready ? 'Ready' : progress.remainingLabel || `${formatDuration(progress.remainingSeconds)} left`}</span>
       </div>
       <div className="launch-progress-track" aria-label="Launch progress">
         <span style={{ width: `${progress.percent}%` }} />
@@ -409,7 +480,7 @@ function LaunchProgressView({
       {!compact && (
         <>
           <div className="launch-phase-list">
-            {LAUNCH_PHASES.map((phase, index) => (
+            {progress.phases.map((phase, index) => (
               <span
                 key={phase.key}
                 className={index < progress.phaseIndex ? 'done' : index === progress.phaseIndex ? 'active' : ''}

@@ -1057,7 +1057,11 @@ systemctl start "${GAME_SERVICE}-idle-shutdown.timer"
 if [[ "${GAME_SERVICE}" == "windrose" ]]; then
   systemctl start "${GAME_SERVICE}-monitor.service"
 fi
-launch_phase "ready" "Bootstrap complete; waiting for game readiness"
+if [[ "${GAME_SERVICE}" == "windrose" ]]; then
+  launch_phase "network" "Waiting for Windrose network listener"
+else
+  launch_phase "ready" "Bootstrap complete; waiting for game readiness"
+fi
 
 cat <<INFO
 {{GAME_NAME}} bootstrap complete.
