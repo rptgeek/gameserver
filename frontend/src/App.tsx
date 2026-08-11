@@ -89,6 +89,8 @@ interface LaunchPhaseMarker {
   atMs?: number;
 }
 
+const LAUNCH_LOG_HISTORY_LIMIT = 800;
+
 interface Toast {
   id: string;
   type: ToastType;
@@ -233,6 +235,19 @@ function launchPhasesFor(instance: ServerInstance): LaunchPhaseDefinition[] {
   return String(instance.amiSource || '').toLowerCase() === 'baked' ? BAKED_LAUNCH_PHASES : LAUNCH_PHASES;
 }
 
+function mergeLaunchLogLines(existing: string[] | undefined, incoming: string[]): string[] {
+  const seen = new Set<string>();
+  const merged: string[] = [];
+  for (const line of [...(existing || []), ...incoming]) {
+    if (seen.has(line)) {
+      continue;
+    }
+    seen.add(line);
+    merged.push(line);
+  }
+  return merged.slice(-LAUNCH_LOG_HISTORY_LIMIT);
+}
+
 function formatDuration(seconds: number): string {
   const safe = Math.max(0, Math.ceil(seconds));
   const minutes = Math.floor(safe / 60);
@@ -291,7 +306,7 @@ function phaseMarkerFromLogs(lines: string[]): LaunchPhaseMarker | undefined {
       current = { key: normalizedMarker, atMs: Number.isNaN(parsedAt) ? undefined : parsedAt };
       continue;
     }
-    if (lower.includes('ueloggedin') || lower.includes('readytoplay')) current = { key: 'ready' };
+    if (lower.includes('ueloggedin') || lower.includes('readytoplay') || lower.includes('rulerequestserver')) current = { key: 'ready' };
     else if (
       lower.includes('notifyacceptingconnection') ||
       lower.includes('login request') ||
@@ -357,7 +372,13 @@ function launchStatusFromLogs(lines: string[], endpoint?: string): string | unde
     if (lower.includes('serverdescription.json')) return 'Applying Windrose server configuration';
     if (lower.includes('started windrose player monitor')) return 'Starting player monitor';
     if (lower.includes('started windrose-server') || lower.includes('started windrose server')) return 'Starting Windrose server';
-    if (lower.includes('ueloggedin') || lower.includes('readytoplay')) return endpoint ? `Game ready at ${endpoint}` : 'Game ready';
+    if (lower.includes('shutdown') || lower.includes('shut down')) {
+      if (lower.includes('bl disconnected') || lower.includes('netdriver') || lower.includes('reactor')) {
+        return 'Player session disconnected during startup';
+      }
+      return 'Server shutdown detected';
+    }
+    if (lower.includes('ueloggedin') || lower.includes('readytoplay') || lower.includes('rulerequestserver')) return endpoint ? `Game ready at ${endpoint}` : 'Game ready';
     if (lower.includes('waitingforbuildingisready') || lower.includes('waitingforclientisready')) return 'Finalizing first player session';
     if (lower.includes('readyforterraingeneration') || lower.includes('terraingeneration')) return 'Preparing world for first player';
     if (lower.includes('notifyacceptingconnection') || lower.includes('login request')) return 'Player connection detected';
@@ -376,7 +397,7 @@ function gameReadyFromLogs(lines: string[], windrose: boolean): boolean {
   return lines.some((line) => {
     const lower = line.toLowerCase();
     if (windrose) {
-      return lower.includes('ueloggedin') || lower.includes('readytoplay');
+      return lower.includes('ueloggedin') || lower.includes('readytoplay') || lower.includes('rulerequestserver');
     }
     return lower.includes('launch_phase phase=ready') || lower.includes('bootstrap complete');
   });
@@ -403,7 +424,7 @@ function buildLaunchProgress(
     !isTerminal &&
     Boolean(instance.publicIp) &&
     (windrose
-      ? markerPhase === 'ready' || Boolean(playerStatus && playerStatus.playerCount > 0)
+      ? markerPhase === 'ready' || gameReadyFromLogs(logLines, true)
       : Boolean(playerStatus?.serverVersion) || markerPhase === 'ready' || gameReadyFromLogs(logLines, false));
 
   if (ready) {
@@ -900,12 +921,13 @@ export default function App() {
       const results = await Promise.allSettled(
         tracked.map(async (instance) => {
           const id = instanceId(instance);
-          const [latest, bootstrap, server] = await Promise.all([
+          const [latest, bootstrap, server, playerStatus] = await Promise.all([
             getInstance(id),
-            getLogs(id, 'bootstrap', undefined, 120),
-            getLogs(id, 'server', undefined, 120),
+            getLogs(id, 'bootstrap', undefined, 250),
+            getLogs(id, 'server', undefined, 250),
+            getPlayerStatus(id),
           ]);
-          return [id, latest, [...bootstrap.lines, ...server.lines]] as const;
+          return [id, latest, [...bootstrap.lines, ...server.lines], playerStatus] as const;
         }),
       );
 
@@ -917,7 +939,16 @@ export default function App() {
         const next = { ...current };
         for (const result of results) {
           if (result.status === 'fulfilled') {
-            next[result.value[0]] = result.value[2];
+            next[result.value[0]] = mergeLaunchLogLines(current[result.value[0]], result.value[2]);
+          }
+        }
+        return next;
+      });
+      setPlayerStatuses((current) => {
+        const next = { ...current };
+        for (const result of results) {
+          if (result.status === 'fulfilled') {
+            next[result.value[0]] = result.value[3];
           }
         }
         return next;

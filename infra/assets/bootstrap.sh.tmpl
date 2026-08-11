@@ -165,7 +165,7 @@ fi
 restore_state() {
   if [[ "${GAME_SERVICE}" == "windrose" ]]; then
     mkdir -p "${STATE_DIR_PATH}/Saved"
-    aws s3 sync "s3://${WORLD_BUCKET}/${WORLD_PREFIX}/state/Saved/" "${STATE_DIR_PATH}/Saved/" || true
+    aws s3 sync "s3://${WORLD_BUCKET}/${WORLD_PREFIX}/state/Saved/" "${STATE_DIR_PATH}/Saved/" --exclude "Logs/*" --exclude "Config/CrashReportClient/*" || true
     aws s3 cp "s3://${WORLD_BUCKET}/${WORLD_PREFIX}/config/windrose/ServerDescription.json" "${STATE_DIR_PATH}/ServerDescription.json" || \
       aws s3 cp "s3://${WORLD_BUCKET}/${WORLD_PREFIX}/state/ServerDescription.json" "${STATE_DIR_PATH}/ServerDescription.json" || true
   else
@@ -270,7 +270,7 @@ upload_state() {
     if command -v docker >/dev/null 2>&1 && docker container inspect WindroseServer >/dev/null 2>&1; then
       docker cp WindroseServer:/home/ue_user/app/R5/ServerDescription.json "${STATE_DIR_PATH}/ServerDescription.json" >/dev/null 2>&1 || true
     fi
-    aws s3 sync "${STATE_DIR_PATH}/Saved/" "s3://${WORLD_BUCKET}/${WORLD_PREFIX}/state/Saved/" --delete || true
+    aws s3 sync "${STATE_DIR_PATH}/Saved/" "s3://${WORLD_BUCKET}/${WORLD_PREFIX}/state/Saved/" --delete --exclude "Logs/*" --exclude "Config/CrashReportClient/*" || true
     if [[ -f "${STATE_DIR_PATH}/ServerDescription.json" ]]; then
       aws s3 cp "${STATE_DIR_PATH}/ServerDescription.json" "s3://${WORLD_BUCKET}/${WORLD_PREFIX}/state/ServerDescription.json" || true
       aws s3 cp "${STATE_DIR_PATH}/ServerDescription.json" "s3://${WORLD_BUCKET}/${WORLD_PREFIX}/config/windrose/ServerDescription.json" || true
@@ -450,7 +450,17 @@ set -euo pipefail
 WORLD_BUCKET='{{WORLD_BUCKET}}'
 WORLD_PREFIX='{{WORLD_PREFIX}}'
 STATE_DIR_PATH='{{STATE_DIR_PATH}}'
-[[ -n "${WORLD_BUCKET}" ]] && [[ -n "${WORLD_PREFIX}" ]] && aws s3 sync "s3://${WORLD_BUCKET}/${WORLD_PREFIX}/state/" "${STATE_DIR_PATH}/" || true
+GAME_SERVICE='{{GAME_SERVICE}}'
+if [[ -n "${WORLD_BUCKET}" ]] && [[ -n "${WORLD_PREFIX}" ]]; then
+  if [[ "${GAME_SERVICE}" == "windrose" ]]; then
+    mkdir -p "${STATE_DIR_PATH}/Saved"
+    aws s3 sync "s3://${WORLD_BUCKET}/${WORLD_PREFIX}/state/Saved/" "${STATE_DIR_PATH}/Saved/" --exclude "Logs/*" --exclude "Config/CrashReportClient/*" || true
+    aws s3 cp "s3://${WORLD_BUCKET}/${WORLD_PREFIX}/config/windrose/ServerDescription.json" "${STATE_DIR_PATH}/ServerDescription.json" || \
+      aws s3 cp "s3://${WORLD_BUCKET}/${WORLD_PREFIX}/state/ServerDescription.json" "${STATE_DIR_PATH}/ServerDescription.json" || true
+  else
+    aws s3 sync "s3://${WORLD_BUCKET}/${WORLD_PREFIX}/state/" "${STATE_DIR_PATH}/" || true
+  fi
+fi
 EOS
 
 cat > "/opt/${GAME_SERVICE}-tools/upload-state.sh" <<'EOS'
@@ -468,7 +478,7 @@ if [[ -n "${WORLD_BUCKET}" ]] && [[ -n "${WORLD_PREFIX}" ]]; then
     if command -v docker >/dev/null 2>&1 && docker container inspect WindroseServer >/dev/null 2>&1; then
       docker cp WindroseServer:/home/ue_user/app/R5/ServerDescription.json "${STATE_DIR_PATH}/ServerDescription.json" >/dev/null 2>&1 || true
     fi
-    aws s3 sync "${STATE_DIR_PATH}/Saved/" "s3://${WORLD_BUCKET}/${WORLD_PREFIX}/state/Saved/" --delete || true
+    aws s3 sync "${STATE_DIR_PATH}/Saved/" "s3://${WORLD_BUCKET}/${WORLD_PREFIX}/state/Saved/" --delete --exclude "Logs/*" --exclude "Config/CrashReportClient/*" || true
   else
     aws s3 sync "${STATE_DIR_PATH}/" "s3://${WORLD_BUCKET}/${WORLD_PREFIX}/state/" --delete || true
   fi
