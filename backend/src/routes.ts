@@ -94,6 +94,7 @@ const BAKED_AMI_ROLE = "game-server";
 const WINDROSE_DOCKER_IMAGE = "windroseserver/windroseserver:latest";
 const WINDROSE_BOOTSTRAP_SCHEMA_VERSION = "2026-07-28-fast-ami-v1";
 const WINDROSE_MONITOR_PATCH_VERSION = "2026-07-27-source-footer-v1";
+const SEVEN_DAYS_BOOTSTRAP_SCHEMA_VERSION = "2026-08-21-fast-ami-v1";
 const DEFAULT_SPOT_INSTANCE_FALLBACKS = [
   "c7i.xlarge",
   "c7i.2xlarge",
@@ -345,9 +346,25 @@ type LaunchImageChoice = {
   amiSource: "profile" | "baked";
   bakedAmiReason?: string;
   windroseDeploymentId?: string;
+  amiBuildKey?: string;
+  amiBootstrapSchemaVersion?: string;
   builderSourceImageId?: string;
   shouldBuildBakedAmi?: boolean;
 };
+
+function normalizedSteamBranch(branch: string | undefined): string {
+  const normalized = branch?.trim();
+  return normalized || "public";
+}
+
+function newestImageId(
+  images: Array<{ ImageId?: string; CreationDate?: string }>,
+): string | undefined {
+  return [...images]
+    .filter((image) => image.ImageId)
+    .sort((a, b) => (b.CreationDate ?? "").localeCompare(a.CreationDate ?? ""))[0]
+    ?.ImageId;
+}
 
 async function windroseDeploymentId(
   bucket: string,
@@ -378,10 +395,7 @@ async function findCompatibleWindroseAmi(
     }),
   );
 
-  return [...(result.Images ?? [])]
-    .filter((image) => image.ImageId)
-    .sort((a, b) => (b.CreationDate ?? "").localeCompare(a.CreationDate ?? ""))[0]
-    ?.ImageId;
+  return newestImageId(result.Images ?? []);
 }
 
 async function findLatestWindroseAmi(): Promise<string | undefined> {
@@ -400,10 +414,30 @@ async function findLatestWindroseAmi(): Promise<string | undefined> {
     }),
   );
 
-  return [...(result.Images ?? [])]
-    .filter((image) => image.ImageId)
-    .sort((a, b) => (b.CreationDate ?? "").localeCompare(a.CreationDate ?? ""))[0]
-    ?.ImageId;
+  return newestImageId(result.Images ?? []);
+}
+
+async function findSevenDaysAmi(
+  steamBranch?: string,
+): Promise<string | undefined> {
+  const filters = [
+    { Name: "state", Values: ["available"] },
+    { Name: "tag:ManagedBy", Values: [MANAGED_BY_TAG] },
+    { Name: "tag:GameId", Values: ["7d2d"] },
+    { Name: "tag:AmiRole", Values: [BAKED_AMI_ROLE] },
+    { Name: "tag:BootstrapSchemaVersion", Values: [SEVEN_DAYS_BOOTSTRAP_SCHEMA_VERSION] },
+  ];
+  if (steamBranch !== undefined) {
+    filters.push({
+      Name: "tag:SteamBetaBranch",
+      Values: [normalizedSteamBranch(steamBranch)],
+    });
+  }
+
+  const result = await ec2Client.send(
+    new DescribeImagesCommand({ Owners: ["self"], Filters: filters }),
+  );
+  return newestImageId(result.Images ?? []);
 }
 
 async function resolveLaunchImageChoice(
@@ -412,9 +446,39 @@ async function resolveLaunchImageChoice(
   gameId: string,
   worldBucket: string,
   worldPrefix: string,
+  steamBetaBranch?: string,
 ): Promise<LaunchImageChoice> {
   const fallbackImageId = await resolveAmiId(explicitAmiId ?? profileAmiId);
-  if (explicitAmiId || gameId !== "windrose") {
+  if (explicitAmiId) {
+    return { imageId: fallbackImageId, amiSource: "profile" };
+  }
+
+  if (gameId === "7d2d") {
+    const branch = normalizedSteamBranch(steamBetaBranch);
+    const bakedImageId = await findSevenDaysAmi(branch);
+    if (bakedImageId) {
+      return {
+        imageId: bakedImageId,
+        amiSource: "baked",
+        bakedAmiReason: "compatible-baked-ami",
+        amiBuildKey: branch,
+        amiBootstrapSchemaVersion: SEVEN_DAYS_BOOTSTRAP_SCHEMA_VERSION,
+      };
+    }
+
+    const latestBakedImageId = await findSevenDaysAmi();
+    return {
+      imageId: fallbackImageId,
+      amiSource: "profile",
+      bakedAmiReason: "no-compatible-baked-ami",
+      amiBuildKey: branch,
+      amiBootstrapSchemaVersion: SEVEN_DAYS_BOOTSTRAP_SCHEMA_VERSION,
+      builderSourceImageId: latestBakedImageId ?? fallbackImageId,
+      shouldBuildBakedAmi: true,
+    };
+  }
+
+  if (gameId !== "windrose") {
     return { imageId: fallbackImageId, amiSource: "profile" };
   }
 
@@ -435,6 +499,8 @@ async function resolveLaunchImageChoice(
       amiSource: "profile",
       bakedAmiReason: "no-compatible-baked-ami",
       windroseDeploymentId: deploymentId,
+      amiBuildKey: deploymentId,
+      amiBootstrapSchemaVersion: WINDROSE_BOOTSTRAP_SCHEMA_VERSION,
       builderSourceImageId: latestBakedImageId ?? fallbackImageId,
       shouldBuildBakedAmi: true,
     };
@@ -445,6 +511,8 @@ async function resolveLaunchImageChoice(
     amiSource: "baked",
     bakedAmiReason: "compatible-baked-ami",
     windroseDeploymentId: deploymentId,
+    amiBuildKey: deploymentId,
+    amiBootstrapSchemaVersion: WINDROSE_BOOTSTRAP_SCHEMA_VERSION,
   };
 }
 
@@ -648,7 +716,16 @@ function renderBootstrapTemplate(profile: GameProfileItem, worldPrefix: string, 
     ENFORCE_BOOTSTRAP_LOG_PREFIX: shellSingleQuote(config.logs.bootstrapPrefix),
     ENFORCE_SERVER_LOG_PREFIX: shellSingleQuote(config.logs.serverPrefix),
     AMI_BUILDER_MODE: shellSingleQuote(profile.profileEnv?.AMI_BUILDER_MODE || "0"),
-    AMI_BUILDER_TARGET_DEPLOYMENT_ID: shellSingleQuote(profile.profileEnv?.AMI_BUILDER_TARGET_DEPLOYMENT_ID || ""),
+    AMI_BUILDER_GAME_ID: shellSingleQuote(profile.profileEnv?.AMI_BUILDER_GAME_ID || ""),
+    AMI_BUILDER_BUILD_KEY: shellSingleQuote(profile.profileEnv?.AMI_BUILDER_BUILD_KEY || ""),
+    AMI_BUILDER_SCHEMA_VERSION: shellSingleQuote(
+      profile.profileEnv?.AMI_BUILDER_SCHEMA_VERSION ||
+        (gameId === "windrose"
+          ? WINDROSE_BOOTSTRAP_SCHEMA_VERSION
+          : gameId === "7d2d"
+            ? SEVEN_DAYS_BOOTSTRAP_SCHEMA_VERSION
+            : ""),
+    ),
     AMI_BUILDER_SOURCE_IMAGE_ID: shellSingleQuote(profile.profileEnv?.AMI_BUILDER_SOURCE_IMAGE_ID || ""),
     WORLD_ID: shellSingleQuote(worldPrefix),
   };
@@ -671,15 +748,15 @@ function encodeUserData(script: string): string {
   return Buffer.from(wrapper, "utf8").toString("base64");
 }
 
-async function hasActiveWindroseAmiBuilder(deploymentId: string): Promise<boolean> {
+async function hasActiveAmiBuilder(gameId: string, buildKey: string): Promise<boolean> {
   const response = await ec2Client.send(
     new DescribeInstancesCommand({
       Filters: [
         { Name: "instance-state-name", Values: ["pending", "running", "stopping"] },
         { Name: "tag:ManagedBy", Values: [MANAGED_BY_TAG] },
-        { Name: "tag:GameId", Values: ["windrose"] },
+        { Name: "tag:GameId", Values: [gameId] },
         { Name: "tag:AmiRole", Values: ["builder"] },
-        { Name: "tag:WindroseDeploymentId", Values: [deploymentId] },
+        { Name: "tag:AmiBuildKey", Values: [buildKey] },
       ],
     }),
   );
@@ -689,7 +766,8 @@ async function hasActiveWindroseAmiBuilder(deploymentId: string): Promise<boolea
   );
 }
 
-async function launchWindroseAmiBuilderIfNeeded(args: {
+async function launchAmiBuilderIfNeeded(args: {
+  gameId: string;
   launchImage: LaunchImageChoice;
   profile: GameProfileItem;
   worldPrefix: string;
@@ -700,18 +778,20 @@ async function launchWindroseAmiBuilderIfNeeded(args: {
   instanceProfileName: string;
   requestedInstanceType: string;
 }): Promise<void> {
-  const deploymentId = args.launchImage.windroseDeploymentId;
+  const buildKey = args.launchImage.amiBuildKey;
+  const schemaVersion = args.launchImage.amiBootstrapSchemaVersion;
   const sourceImageId = args.launchImage.builderSourceImageId;
   if (
     !args.launchImage.shouldBuildBakedAmi ||
     args.launchImage.amiSource === "baked" ||
-    !deploymentId ||
+    !buildKey ||
+    !schemaVersion ||
     !sourceImageId
   ) {
     return;
   }
 
-  if (await hasActiveWindroseAmiBuilder(deploymentId)) {
+  if (await hasActiveAmiBuilder(args.gameId, buildKey)) {
     return;
   }
 
@@ -720,18 +800,20 @@ async function launchWindroseAmiBuilderIfNeeded(args: {
     ...args.profile,
     worldBucket: args.worldBucket,
     worldBucketRegion: args.profile.worldBucketRegion || config.awsRegion,
-    gameName: args.profile.gameName || "windrose",
-    gameHome: args.profile.gameHome || "/opt/windrose",
-    gameStateDirPath: args.profile.gameStateDirPath || "/srv/windrose-state",
+    gameName: args.profile.gameName || args.gameId,
+    gameHome: args.profile.gameHome || `/opt/${args.gameId}`,
+    gameStateDirPath: args.profile.gameStateDirPath || `/srv/${args.gameId}-state`,
     profileEnv: {
       ...(args.profile.profileEnv ?? {}),
       AMI_BUILDER_MODE: "1",
-      AMI_BUILDER_TARGET_DEPLOYMENT_ID: deploymentId,
+      AMI_BUILDER_GAME_ID: args.gameId,
+      AMI_BUILDER_BUILD_KEY: buildKey,
+      AMI_BUILDER_SCHEMA_VERSION: schemaVersion,
       AMI_BUILDER_SOURCE_IMAGE_ID: sourceImageId,
     },
   };
-  const userData = encodeUserData(renderBootstrapTemplate(builderProfile, args.worldPrefix, "windrose"));
-  const builderName = `Windrose AMI Builder ${deploymentId}`.slice(0, 255);
+  const userData = encodeUserData(renderBootstrapTemplate(builderProfile, args.worldPrefix, args.gameId));
+  const builderName = `${args.gameId} AMI Builder ${buildKey}`.slice(0, 255);
 
   await ec2Client.send(
     new RunInstancesCommand({
@@ -768,9 +850,13 @@ async function launchWindroseAmiBuilderIfNeeded(args: {
           Tags: [
             { Key: "Name", Value: builderName },
             { Key: "ManagedBy", Value: MANAGED_BY_TAG },
-            { Key: "GameId", Value: "windrose" },
+            { Key: "GameId", Value: args.gameId },
             { Key: "AmiRole", Value: "builder" },
-            { Key: "WindroseDeploymentId", Value: deploymentId },
+            { Key: "AmiBuildKey", Value: buildKey },
+            { Key: "BootstrapSchemaVersion", Value: schemaVersion },
+            ...(args.launchImage.windroseDeploymentId
+              ? [{ Key: "WindroseDeploymentId", Value: args.launchImage.windroseDeploymentId }]
+              : []),
             { Key: "SourceImageId", Value: sourceImageId },
             { Key: "WorldPrefix", Value: args.worldPrefix },
           ],
@@ -1884,6 +1970,7 @@ async function createInstancesForSpec(
     gameId,
     worldBucket,
     worldPrefix,
+    spec.steamBetaBranch || profile.steamBetaBranch,
   );
   const imageId = launchImage.imageId;
   const rootDeviceName = await resolveAmiRootDeviceName(imageId);
@@ -2001,6 +2088,9 @@ async function createInstancesForSpec(
                     ...(launchImage.windroseDeploymentId
                       ? [{ Key: "WindroseDeploymentId", Value: launchImage.windroseDeploymentId }]
                       : []),
+                    ...(launchImage.amiBuildKey
+                      ? [{ Key: "AmiBuildKey", Value: launchImage.amiBuildKey }]
+                      : []),
                   ],
                 },
               ],
@@ -2044,9 +2134,10 @@ async function createInstancesForSpec(
     throw new Error("No spot placement was selected for launch");
   }
 
-  if (gameId === "windrose") {
+  if (gameId === "windrose" || gameId === "7d2d") {
     try {
-      await launchWindroseAmiBuilderIfNeeded({
+      await launchAmiBuilderIfNeeded({
+        gameId,
         launchImage,
         profile: bootstrapProfile as unknown as GameProfileItem,
         worldPrefix,
@@ -2058,7 +2149,7 @@ async function createInstancesForSpec(
         requestedInstanceType: launchedInstanceType,
       });
     } catch (error) {
-      console.error("Failed to launch Windrose AMI builder", error);
+      console.error(`Failed to launch ${gameId} AMI builder`, error);
     }
   }
 
@@ -2091,6 +2182,7 @@ async function createInstancesForSpec(
       amiSource: launchImage.amiSource,
       bakedAmiReason: launchImage.bakedAmiReason,
       windroseDeploymentId: launchImage.windroseDeploymentId,
+      amiBuildKey: launchImage.amiBuildKey,
       instanceType: launchedInstanceType,
       subnetId: launchedSpot.subnetId,
       securityGroupIds,

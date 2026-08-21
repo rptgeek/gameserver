@@ -19,6 +19,11 @@ Legacy scripts (`start-game-spot.sh`, `stop-game-spot.sh`, `status-game-spot.sh`
 - `instance runtime` executes bootstrap script and systemd services.
 - `state store` uses DynamoDB records plus S3 world/state prefixes.
 
+For Windrose and 7d2d, the control plane also manages branch/schema-compatible baked AMIs.
+A missing compatible image causes a dedicated on-demand builder to run in parallel with the
+first cold game launch; subsequent launches reuse the baked host and game files while still
+performing the configured install/update validation.
+
 ## Multi-Game Profile Model
 
 `GameProfile` is the authoritative contract for a game deployment.

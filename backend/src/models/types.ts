@@ -109,6 +109,7 @@ export interface InstanceItem {
   amiSource?: "profile" | "baked";
   bakedAmiReason?: string;
   windroseDeploymentId?: string;
+  amiBuildKey?: string;
   instanceType?: string;
   subnetId?: string;
   securityGroupIds?: string[];

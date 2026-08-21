@@ -79,6 +79,28 @@ All tracked operations use this state machine:
   - last startup log line not older than expected for deployment age.
   - successful backups observed in last interval (`BACKUP_INTERVAL_MINUTES` ± 2).
 
+## Baked AMI lifecycle
+
+- Windrose and 7d2d launches automatically look for a compatible, self-owned AMI tagged with
+  `ManagedBy=7d2d-console`, the matching `GameId`, `AmiRole=game-server`, and the current
+  bootstrap schema version.
+- 7d2d AMIs are additionally keyed by `SteamBetaBranch`. An empty branch is recorded as
+  `public`; `latest_experimental` is maintained independently.
+- When no compatible AMI exists, the requested game server still launches from its profile
+  AMI. The control plane also starts one on-demand builder instance in parallel. The builder
+  installs the host dependencies and game files, removes world state, creates the AMI, and
+  terminates itself.
+- Later launches use the baked AMI, skip host package installation, and still run SteamCMD
+  validation so branch updates are applied without downloading a complete clean install.
+- Supplying an explicit AMI in an instance request opts out of automatic AMI selection and
+  building for that request.
+- Builder health can be checked with EC2 tags `AmiRole=builder`, `GameId`, and `AmiBuildKey`.
+  Successful images use the same `AmiBuildKey` and `BootstrapSchemaVersion` tags.
+
+The game is launched only by `${GAME_SERVICE}-server.service`. Bootstrap must never invoke
+`start-server.command` directly: doing so blocks timer installation and can place saves under
+the bootstrap user's home instead of `STATE_DIR_PATH`.
+
 ## Runbook: 0, 1, and 2+ active instances for same game
 
 ### Case A: 0 active instances

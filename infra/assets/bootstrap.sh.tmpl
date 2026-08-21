@@ -27,7 +27,9 @@ GAME_INGRESS_CIDR={{GAME_INGRESS_CIDR}}
 ENFORCE_BOOTSTRAP_LOG_PREFIX={{ENFORCE_BOOTSTRAP_LOG_PREFIX}}
 ENFORCE_SERVER_LOG_PREFIX={{ENFORCE_SERVER_LOG_PREFIX}}
 AMI_BUILDER_MODE={{AMI_BUILDER_MODE}}
-AMI_BUILDER_TARGET_DEPLOYMENT_ID={{AMI_BUILDER_TARGET_DEPLOYMENT_ID}}
+AMI_BUILDER_GAME_ID={{AMI_BUILDER_GAME_ID}}
+AMI_BUILDER_BUILD_KEY={{AMI_BUILDER_BUILD_KEY}}
+AMI_BUILDER_SCHEMA_VERSION={{AMI_BUILDER_SCHEMA_VERSION}}
 AMI_BUILDER_SOURCE_IMAGE_ID={{AMI_BUILDER_SOURCE_IMAGE_ID}}
 EC2_INSTANCE_ID="${EC2_INSTANCE_ID:-$(curl -fsS http://169.254.169.254/latest/meta-data/instance-id || true)}"
 
@@ -60,7 +62,9 @@ GAME_INGRESS_CIDR="$(strip_wrapping_quotes "${GAME_INGRESS_CIDR}")"
 ENFORCE_BOOTSTRAP_LOG_PREFIX="$(strip_wrapping_quotes "${ENFORCE_BOOTSTRAP_LOG_PREFIX}")"
 ENFORCE_SERVER_LOG_PREFIX="$(strip_wrapping_quotes "${ENFORCE_SERVER_LOG_PREFIX}")"
 AMI_BUILDER_MODE="$(strip_wrapping_quotes "${AMI_BUILDER_MODE}")"
-AMI_BUILDER_TARGET_DEPLOYMENT_ID="$(strip_wrapping_quotes "${AMI_BUILDER_TARGET_DEPLOYMENT_ID}")"
+AMI_BUILDER_GAME_ID="$(strip_wrapping_quotes "${AMI_BUILDER_GAME_ID}")"
+AMI_BUILDER_BUILD_KEY="$(strip_wrapping_quotes "${AMI_BUILDER_BUILD_KEY}")"
+AMI_BUILDER_SCHEMA_VERSION="$(strip_wrapping_quotes "${AMI_BUILDER_SCHEMA_VERSION}")"
 AMI_BUILDER_SOURCE_IMAGE_ID="$(strip_wrapping_quotes "${AMI_BUILDER_SOURCE_IMAGE_ID}")"
 
 decode() {
@@ -87,16 +91,26 @@ launch_phase() {
 launch_phase "bootstrap" "Bootstrapping host"
 
 host_packages_ready=false
-if [[ "${GAME_SERVICE}" == "windrose" ]] &&
-  command -v aws >/dev/null 2>&1 &&
-  command -v docker >/dev/null 2>&1 &&
-  docker image inspect windroseserver/windroseserver:latest >/dev/null 2>&1; then
-  host_packages_ready=true
+baked_ami_marker="/opt/${GAME_SERVICE}-tools/baked-ami-${AMI_BUILDER_SCHEMA_VERSION}"
+if command -v aws >/dev/null 2>&1; then
+  if [[ "${GAME_SERVICE}" == "windrose" ]] &&
+    command -v docker >/dev/null 2>&1 &&
+    docker image inspect windroseserver/windroseserver:latest >/dev/null 2>&1; then
+    host_packages_ready=true
+  elif [[ "${GAME_SERVICE}" == "7d2d" ]] &&
+    [[ -n "${AMI_BUILDER_SCHEMA_VERSION}" ]] &&
+    [[ -f "${baked_ami_marker}" ]] &&
+    [[ -x /opt/steamcmd/steamcmd.sh ]] &&
+    [[ -x "${GAME_HOME}/7DaysToDieServer.x86_64" ]]; then
+    host_packages_ready=true
+  fi
 fi
 
 if [[ "${host_packages_ready}" == "true" ]]; then
-  echo "Host packages already present for baked Windrose AMI; skipping package update."
-  systemctl enable --now docker || true
+  echo "Host packages already present for baked ${GAME_NAME} AMI; skipping package update."
+  if [[ "${GAME_SERVICE}" == "windrose" ]]; then
+    systemctl enable --now docker || true
+  fi
 elif command -v yum >/dev/null 2>&1; then
   yum -y update
   yum -y install ca-certificates tar gzip curl cronie python3 || true
@@ -678,19 +692,37 @@ ensure_steamclient() {
   fi
 }
 
-run_windrose_ami_builder() {
-  if [[ "${AMI_BUILDER_MODE}" != "1" || "${GAME_SERVICE}" != "windrose" ]]; then
+run_baked_ami_builder() {
+  if [[ "${AMI_BUILDER_MODE}" != "1" ]]; then
     return 1
   fi
 
-  local deployment_id="${AMI_BUILDER_TARGET_DEPLOYMENT_ID:-unknown}"
+  local builder_game_id="${AMI_BUILDER_GAME_ID:-${GAME_SERVICE}}"
+  local build_key="${AMI_BUILDER_BUILD_KEY:-default}"
+  local schema_version="${AMI_BUILDER_SCHEMA_VERSION:-unknown}"
+  local safe_build_key
+  safe_build_key="$(printf '%s' "${build_key}" | tr -c 'A-Za-z0-9._-' '-')"
   local timestamp
   timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
-  local ami_name="windrose-${deployment_id}-${timestamp}"
+  local ami_name="${builder_game_id}-${safe_build_key}-${timestamp}"
+  local image_extra_tags=""
+  local snapshot_extra_tags=""
 
-  echo "Preparing Windrose baked AMI ${ami_name} from ${EC2_INSTANCE_ID}."
+  if [[ "${builder_game_id}" == "windrose" ]]; then
+    image_extra_tags=",{Key=WindroseDeploymentId,Value=${build_key}},{Key=WindroseDockerImage,Value=windroseserver/windroseserver:latest},{Key=MonitorPatchVersion,Value=2026-07-27-source-footer-v1}"
+    snapshot_extra_tags=",{Key=WindroseDeploymentId,Value=${build_key}}"
+  elif [[ "${builder_game_id}" == "7d2d" ]]; then
+    image_extra_tags=",{Key=SteamBetaBranch,Value=${build_key}}"
+  fi
+
+  echo "Preparing ${builder_game_id} baked AMI ${ami_name} from ${EC2_INSTANCE_ID}."
   systemctl stop "${GAME_SERVICE}-server.service" "${GAME_SERVICE}-monitor.service" 2>/dev/null || true
-  rm -rf "${STATE_DIR_PATH}/Saved" "${STATE_DIR_PATH}/ServerDescription.json" || true
+  if [[ -n "${STATE_DIR_PATH}" && -d "${STATE_DIR_PATH}" ]]; then
+    find "${STATE_DIR_PATH}" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + || true
+  fi
+  mkdir -p "$(dirname "${baked_ami_marker}")"
+  touch "${baked_ami_marker}"
+  cloud-init clean --logs 2>/dev/null || true
   sync || true
 
   local ami_id
@@ -699,16 +731,16 @@ run_windrose_ami_builder() {
       --region "${AWS_DEFAULT_REGION}" \
       --instance-id "${EC2_INSTANCE_ID}" \
       --name "${ami_name}" \
-      --description "Windrose baked game-server AMI for deployment ${deployment_id}" \
+      --description "${builder_game_id} baked game-server AMI for ${build_key}" \
       --no-reboot \
       --tag-specifications \
-        "ResourceType=image,Tags=[{Key=ManagedBy,Value=7d2d-console},{Key=GameId,Value=windrose},{Key=AmiRole,Value=game-server},{Key=WindroseDeploymentId,Value=${deployment_id}},{Key=WindroseDockerImage,Value=windroseserver/windroseserver:latest},{Key=BootstrapSchemaVersion,Value=2026-07-28-fast-ami-v1},{Key=MonitorPatchVersion,Value=2026-07-27-source-footer-v1},{Key=SourceInstanceId,Value=${EC2_INSTANCE_ID}},{Key=SourceImageId,Value=${AMI_BUILDER_SOURCE_IMAGE_ID}},{Key=WorldPrefix,Value=${WORLD_PREFIX}}]" \
-        "ResourceType=snapshot,Tags=[{Key=ManagedBy,Value=7d2d-console},{Key=GameId,Value=windrose},{Key=AmiRole,Value=game-server},{Key=WindroseDeploymentId,Value=${deployment_id}},{Key=SourceInstanceId,Value=${EC2_INSTANCE_ID}}]" \
+        "ResourceType=image,Tags=[{Key=ManagedBy,Value=7d2d-console},{Key=GameId,Value=${builder_game_id}},{Key=AmiRole,Value=game-server},{Key=AmiBuildKey,Value=${build_key}},{Key=BootstrapSchemaVersion,Value=${schema_version}},{Key=SourceInstanceId,Value=${EC2_INSTANCE_ID}},{Key=SourceImageId,Value=${AMI_BUILDER_SOURCE_IMAGE_ID}},{Key=WorldPrefix,Value=${WORLD_PREFIX}}${image_extra_tags}]" \
+        "ResourceType=snapshot,Tags=[{Key=ManagedBy,Value=7d2d-console},{Key=GameId,Value=${builder_game_id}},{Key=AmiRole,Value=game-server},{Key=AmiBuildKey,Value=${build_key}},{Key=SourceInstanceId,Value=${EC2_INSTANCE_ID}}${snapshot_extra_tags}]" \
       --query ImageId \
       --output text
   )"
 
-  echo "Created Windrose baked AMI request: ${ami_id}"
+  echo "Created ${builder_game_id} baked AMI request: ${ami_id}"
   aws ec2 wait image-available --region "${AWS_DEFAULT_REGION}" --image-ids "${ami_id}"
   echo "AMI available: ${ami_id}"
 
@@ -719,14 +751,15 @@ run_windrose_ami_builder() {
       --owners self \
       --filters \
         Name=tag:ManagedBy,Values=7d2d-console \
-        Name=tag:GameId,Values=windrose \
+        Name=tag:GameId,Values="${builder_game_id}" \
         Name=tag:AmiRole,Values=game-server \
+        Name=tag:AmiBuildKey,Values="${build_key}" \
       --query "Images[?ImageId!='${ami_id}'].ImageId" \
       --output text
   )"
 
   for old_image in ${old_images}; do
-    echo "Deregistering old Windrose baked AMI ${old_image}."
+    echo "Deregistering old ${builder_game_id} baked AMI ${old_image}."
     old_snapshots="$(
       aws ec2 describe-images \
         --region "${AWS_DEFAULT_REGION}" \
@@ -737,7 +770,7 @@ run_windrose_ami_builder() {
     aws ec2 deregister-image --region "${AWS_DEFAULT_REGION}" --image-id "${old_image}" || true
     for snapshot_id in ${old_snapshots}; do
       if [[ -n "${snapshot_id}" && "${snapshot_id}" != "None" ]]; then
-        echo "Deleting old Windrose baked AMI snapshot ${snapshot_id}."
+        echo "Deleting old ${builder_game_id} baked AMI snapshot ${snapshot_id}."
         aws ec2 delete-snapshot --region "${AWS_DEFAULT_REGION}" --snapshot-id "${snapshot_id}" || true
       fi
     done
@@ -1030,14 +1063,15 @@ install_windrose_monitor
 systemctl daemon-reload
 
 if [[ "${AMI_BUILDER_MODE}" == "1" ]]; then
-  launch_phase "ready" "Baking updated Windrose AMI"
-  run_windrose_ami_builder
+  launch_phase "ready" "Baking updated ${GAME_NAME} AMI"
+  run_baked_ami_builder
   exit 0
 fi
 
 if [[ -n "${GAMECONFIG_S3_KEY}" ]]; then
   launch_phase "config" "Applying server config"
-  GAMECONFIG_LOCAL_PATH="${GAMECONFIG_LOCAL_PATH}" WORLD_BUCKET="{{WORLD_BUCKET}}" WORLD_PREFIX="{{WORLD_PREFIX}}" /opt/${GAME_SERVICE}-tools/start-server.command || true
+  mkdir -p "$(dirname "${GAMECONFIG_LOCAL_PATH}")"
+  aws s3 cp "s3://${WORLD_BUCKET}/${GAMECONFIG_S3_KEY}" "${GAMECONFIG_LOCAL_PATH}" || true
 fi
 
 if id -u "${SERVICE_USER}" >/dev/null 2>&1; then

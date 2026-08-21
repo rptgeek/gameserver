@@ -216,7 +216,7 @@ export class PlatformInfraStack extends cdk.Stack {
     });
     gameServerEc2Role.addToPrincipalPolicy(
       new iam.PolicyStatement({
-        sid: 'WindroseAmiBuilderSelfManagement',
+        sid: 'GameAmiBuilderSelfManagement',
         effect: iam.Effect.ALLOW,
         actions: [
           'ec2:CreateImage',
