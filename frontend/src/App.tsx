@@ -306,7 +306,8 @@ function phaseMarkerFromLogs(lines: string[]): LaunchPhaseMarker | undefined {
       current = { key: normalizedMarker, atMs: Number.isNaN(parsedAt) ? undefined : parsedAt };
       continue;
     }
-    if (lower.includes('ueloggedin') || lower.includes('readytoplay') || lower.includes('rulerequestserver')) current = { key: 'ready' };
+    if (lower.includes('startgame done')) current = { key: 'ready' };
+    else if (lower.includes('ueloggedin') || lower.includes('readytoplay') || lower.includes('rulerequestserver')) current = { key: 'ready' };
     else if (
       lower.includes('notifyacceptingconnection') ||
       lower.includes('login request') ||
@@ -378,6 +379,8 @@ function launchStatusFromLogs(lines: string[], endpoint?: string): string | unde
       }
       return 'Server shutdown detected';
     }
+    if (lower.includes('startgame done')) return endpoint ? `Game ready at ${endpoint}` : 'Game ready';
+    if (lower.includes('server is still initializing')) return 'Server initializing; loading world';
     if (lower.includes('ueloggedin') || lower.includes('readytoplay') || lower.includes('rulerequestserver')) return endpoint ? `Game ready at ${endpoint}` : 'Game ready';
     if (lower.includes('waitingforbuildingisready') || lower.includes('waitingforclientisready')) return 'Finalizing first player session';
     if (lower.includes('readyforterraingeneration') || lower.includes('terraingeneration')) return 'Preparing world for first player';
@@ -399,14 +402,13 @@ function gameReadyFromLogs(lines: string[], windrose: boolean): boolean {
     if (windrose) {
       return lower.includes('ueloggedin') || lower.includes('readytoplay') || lower.includes('rulerequestserver');
     }
-    return lower.includes('launch_phase phase=ready') || lower.includes('bootstrap complete');
+    return lower.includes('startgame done');
   });
 }
 
 function buildLaunchProgress(
   instance: ServerInstance,
   logLines: string[],
-  playerStatus: PlayerStatus | undefined,
   nowMs: number,
 ): LaunchProgress | undefined {
   const status = normalizeStatus(instance.status);
@@ -425,7 +427,7 @@ function buildLaunchProgress(
     Boolean(instance.publicIp) &&
     (windrose
       ? markerPhase === 'ready' || gameReadyFromLogs(logLines, true)
-      : Boolean(playerStatus?.serverVersion) || markerPhase === 'ready' || gameReadyFromLogs(logLines, false));
+      : gameReadyFromLogs(logLines, false));
 
   if (ready) {
     return {
@@ -791,7 +793,6 @@ export default function App() {
     buildLaunchProgress(
       instance,
       launchLogLines[instanceId(instance)] ?? [],
-      playerStatuses[instanceId(instance)],
       launchProgressTick,
     );
 
