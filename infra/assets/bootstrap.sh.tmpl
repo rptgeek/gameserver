@@ -1059,8 +1059,15 @@ if [[ "${AMI_BUILDER_MODE}" == "1" ]]; then
 else
   restore_state
 fi
-launch_phase "install" "Installing game files"
-install_game
+if [[ "${GAME_SERVICE}" == "7d2d" ]] &&
+  [[ "${host_packages_ready}" == "true" ]] &&
+  [[ "${AMI_BUILDER_MODE}" != "1" ]]; then
+  launch_phase "install" "Using baked game files"
+  echo "Compatible baked 7d2d files are present; skipping SteamCMD install and validation."
+else
+  launch_phase "install" "Installing game files"
+  install_game
+fi
 install_windrose_monitor
 systemctl daemon-reload
 

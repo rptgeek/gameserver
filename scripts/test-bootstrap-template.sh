@@ -30,5 +30,8 @@ awk '
 ' "${TEMPLATE_PATH}"
 
 grep -Fq 'cat >> "/opt/${GAME_SERVICE}-tools/start-server.command" <<'\''EOS'\''' "${TEMPLATE_PATH}"
+grep -Fq '[[ "${host_packages_ready}" == "true" ]]' "${TEMPLATE_PATH}"
+grep -Fq '[[ "${AMI_BUILDER_MODE}" != "1" ]]' "${TEMPLATE_PATH}"
+grep -Fq 'skipping SteamCMD install and validation' "${TEMPLATE_PATH}"
 
 echo "Bootstrap template validation passed."
