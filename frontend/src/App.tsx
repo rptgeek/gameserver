@@ -223,6 +223,19 @@ function totalLaunchSeconds(phases: LaunchPhaseDefinition[]): number {
 }
 
 const TOTAL_LAUNCH_SECONDS = totalLaunchSeconds(LAUNCH_PHASES);
+const LAUNCH_PHASE_ORDER = [
+  'ec2',
+  'bootstrap',
+  'files',
+  'install',
+  'config',
+  'game',
+  'network',
+  'world',
+  'waiting-account',
+  'first-player',
+  'ready',
+];
 
 function isWindroseInstance(instance: ServerInstance): boolean {
   return instanceGameId(instance).toLowerCase() === 'windrose';
@@ -281,6 +294,20 @@ function phaseIndexForElapsed(phases: LaunchPhaseDefinition[], elapsedSeconds: n
 
 function phaseMarkerFromLogs(lines: string[]): LaunchPhaseMarker | undefined {
   let current: LaunchPhaseMarker | undefined;
+  const considerMarker = (candidate: LaunchPhaseMarker) => {
+    if (!current) {
+      current = candidate;
+      return;
+    }
+    const currentIndex = LAUNCH_PHASE_ORDER.indexOf(current.key);
+    const candidateIndex = LAUNCH_PHASE_ORDER.indexOf(candidate.key);
+    if (candidateIndex > currentIndex) {
+      current = candidate;
+    } else if (candidateIndex === currentIndex && !current.atMs && candidate.atMs) {
+      current = candidate;
+    }
+  };
+
   for (const line of lines) {
     const lower = line.toLowerCase();
     const match = line.match(/LAUNCH_PHASE\s+phase=([a-z-]+).*?\bat=([^\s]+)/i);
@@ -303,11 +330,11 @@ function phaseMarkerFromLogs(lines: string[]): LaunchPhaseMarker | undefined {
         marker === 'ready' && lower.includes('waiting for game readiness')
           ? 'network'
           : marker;
-      current = { key: normalizedMarker, atMs: Number.isNaN(parsedAt) ? undefined : parsedAt };
+      considerMarker({ key: normalizedMarker, atMs: Number.isNaN(parsedAt) ? undefined : parsedAt });
       continue;
     }
-    if (lower.includes('startgame done')) current = { key: 'ready' };
-    else if (lower.includes('ueloggedin') || lower.includes('readytoplay') || lower.includes('rulerequestserver')) current = { key: 'ready' };
+    if (lower.includes('startgame done')) considerMarker({ key: 'ready' });
+    else if (lower.includes('ueloggedin') || lower.includes('readytoplay') || lower.includes('rulerequestserver')) considerMarker({ key: 'ready' });
     else if (
       lower.includes('notifyacceptingconnection') ||
       lower.includes('login request') ||
@@ -315,19 +342,19 @@ function phaseMarkerFromLogs(lines: string[]): LaunchPhaseMarker | undefined {
       lower.includes('terraingeneration') ||
       lower.includes('waitingforbuildingisready') ||
       lower.includes('waitingforclientisready')
-    ) current = { key: 'first-player' };
-    else if (lower.includes('waitingforfirstaccount')) current = { key: 'waiting-account' };
+    ) considerMarker({ key: 'first-player' });
+    else if (lower.includes('waitingforfirstaccount')) considerMarker({ key: 'waiting-account' });
     else if (
       lower.includes('loadmap load map complete /game/maps/gym/genlandia/genlandiamulty') ||
       lower.includes('bringing world /game/maps/gym/genlandia/genlandiamulty')
-    ) current = { key: 'world' };
-    else if (lower.includes('grpc server started') || lower.includes('ipnetdriver listening on port 7777')) current = { key: 'network' };
-    else if (lower.includes('bootstrap complete')) current = { key: 'network' };
-    else if (lower.includes('success! app') && lower.includes('fully installed')) current = { key: 'install' };
-    else if (lower.includes(' update state ') || lower.includes('steamcmd') || lower.includes('download complete')) current = { key: 'install' };
-    else if (lower.includes('pulling from windroseserver') || lower.includes('downloaded newer image')) current = { key: 'install' };
-    else if (lower.includes('aws s3 sync') || lower.includes('world path:')) current = { key: 'files' };
-    else if (lower.includes('serverdescription.json')) current = { key: 'config' };
+    ) considerMarker({ key: 'world' });
+    else if (lower.includes('grpc server started') || lower.includes('ipnetdriver listening on port 7777')) considerMarker({ key: 'network' });
+    else if (lower.includes('bootstrap complete')) considerMarker({ key: 'network' });
+    else if (lower.includes('success! app') && lower.includes('fully installed')) considerMarker({ key: 'install' });
+    else if (lower.includes(' update state ') || lower.includes('steamcmd') || lower.includes('download complete')) considerMarker({ key: 'install' });
+    else if (lower.includes('pulling from windroseserver') || lower.includes('downloaded newer image')) considerMarker({ key: 'install' });
+    else if (lower.includes('aws s3 sync') || lower.includes('world path:')) considerMarker({ key: 'files' });
+    else if (lower.includes('serverdescription.json')) considerMarker({ key: 'config' });
   }
   return current;
 }
