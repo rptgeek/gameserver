@@ -517,6 +517,34 @@ function LaunchProgressView({
   );
 }
 
+function CopyableIp({
+  ip,
+  onCopy,
+}: {
+  ip?: string;
+  onCopy: (ip: string) => void;
+}) {
+  if (!ip) {
+    return <>—</>;
+  }
+
+  return (
+    <button
+      type="button"
+      className="copyable-ip"
+      onClick={() => onCopy(ip)}
+      aria-label={`Copy IP address ${ip}`}
+      title="Copy IP address"
+    >
+      {ip}
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M8 8h11v11H8z" />
+        <path d="M16 8V5H5v11h3" />
+      </svg>
+    </button>
+  );
+}
+
 function s3KeyFromDisplayPath(displayPath: string, bucket?: string): string | undefined {
   const trimmed = displayPath.trim();
   if (!trimmed) {
@@ -1605,6 +1633,15 @@ export default function App() {
     }
   };
 
+  const handleCopyIpAddress = async (ip: string) => {
+    try {
+      await navigator.clipboard.writeText(ip);
+      notify('success', `IP address ${ip} copied`);
+    } catch {
+      notify('error', 'Unable to copy IP address');
+    }
+  };
+
   const handleEditWindroseRuntimeJson = (
     world: WorldPreset,
     section: WindroseJsonFocus,
@@ -1819,7 +1856,7 @@ export default function App() {
                           <span>Last backup</span>
                           <strong>{prettyDate(runtime.lastBackupAt)}</strong>
                           <span>Public IP</span>
-                          <strong>{runtime.publicIp || '—'}</strong>
+                          <CopyableIp ip={runtime.publicIp} onCopy={handleCopyIpAddress} />
                           <span>Players</span>
                           <strong>{playerSummary(status)}</strong>
                           <span>Version</span>
@@ -1982,7 +2019,7 @@ export default function App() {
                           {launchProgress && <LaunchProgressView progress={launchProgress} compact />}
                         </td>
                         <td>{instance.region || '—'}</td>
-                        <td>{instance.publicIp || '—'}</td>
+                        <td><CopyableIp ip={instance.publicIp} onCopy={handleCopyIpAddress} /></td>
                         <td>{prettyDate(instance.startedAt)}</td>
                         <td>
                           <div className="row-actions">
@@ -2124,7 +2161,7 @@ export default function App() {
                     </div>
                     <div className="kv">
                       <span>Public IP</span>
-                      <strong>{selectedInstance.publicIp || '—'}</strong>
+                      <CopyableIp ip={selectedInstance.publicIp} onCopy={handleCopyIpAddress} />
                     </div>
                     <div className="kv">
                       <span>Started</span>

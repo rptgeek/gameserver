@@ -11,6 +11,7 @@
   },
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
+    "test:bootstrap": "bash scripts/test-bootstrap-template.sh",
     "frontend:build": "npm run build --prefix frontend",
     "frontend:deploy": "bash scripts/deploy-frontend.sh",
     "frontend:release": "npm run frontend:deploy"

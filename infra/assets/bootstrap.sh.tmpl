@@ -691,6 +691,7 @@ ensure_steamclient() {
     ln -sf "${steam_lib}" "${user_home}/.steam/sdk64/steamclient.so"
   fi
 }
+EOS
 
 run_baked_ami_builder() {
   if [[ "${AMI_BUILDER_MODE}" != "1" ]]; then
@@ -781,6 +782,7 @@ run_baked_ami_builder() {
   shutdown -h now || true
 }
 
+cat >> "/opt/${GAME_SERVICE}-tools/start-server.command" <<'EOS'
 runtime_user="${USER:-$(whoami)}"
 export USER="${runtime_user}"
 export HOME="${HOME:-$(getent passwd "${runtime_user}" | cut -d: -f6 || true)}"
