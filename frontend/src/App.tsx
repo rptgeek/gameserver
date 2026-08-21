@@ -240,17 +240,17 @@ const LAUNCH_PHASES: LaunchPhaseDefinition[] = [
   { key: 'files', label: 'Loading save files', estimateSeconds: 45 },
   { key: 'install', label: 'Installing game files', estimateSeconds: 240 },
   { key: 'config', label: 'Updating server config', estimateSeconds: 25 },
-  { key: 'game', label: 'Launching game server', estimateSeconds: 120 },
+  { key: 'game', label: 'Loading 7D2D world', estimateSeconds: 600 },
   { key: 'ready', label: 'Game ready', estimateSeconds: 0 },
 ];
 
 const BAKED_LAUNCH_PHASES: LaunchPhaseDefinition[] = [
-  { key: 'ec2', label: 'Launching EC2 server', estimateSeconds: 60 },
-  { key: 'bootstrap', label: 'Bootstrapping host', estimateSeconds: 45 },
-  { key: 'files', label: 'Loading save files', estimateSeconds: 50 },
-  { key: 'install', label: 'Game files ready', estimateSeconds: 10 },
-  { key: 'config', label: 'Updating server config', estimateSeconds: 15 },
-  { key: 'game', label: 'Launching game server', estimateSeconds: 55 },
+  { key: 'ec2', label: 'Launching EC2 server', estimateSeconds: 70 },
+  { key: 'bootstrap', label: 'Bootstrapping host', estimateSeconds: 20 },
+  { key: 'files', label: 'Loading save files', estimateSeconds: 20 },
+  { key: 'install', label: 'Game files ready', estimateSeconds: 5 },
+  { key: 'config', label: 'Updating server config', estimateSeconds: 5 },
+  { key: 'game', label: 'Loading 7D2D world', estimateSeconds: 600 },
   { key: 'ready', label: 'Game ready', estimateSeconds: 0 },
 ];
 
@@ -500,8 +500,8 @@ function buildLaunchProgress(
   const phases = launchPhasesFor(instance);
   const totalSeconds = totalLaunchSeconds(phases);
   const marker = phaseMarkerFromLogs(logLines);
-  const markerPhase = marker?.key;
   const windrose = isWindroseInstance(instance);
+  const markerPhase = !windrose && marker?.key === 'network' ? 'game' : marker?.key;
   const ready =
     !isTerminal &&
     Boolean(instance.publicIp) &&
@@ -556,7 +556,12 @@ function buildLaunchProgress(
     phaseIndex,
     elapsedSeconds,
     remainingSeconds,
-    remainingLabel: waitingForFirstPlayer ? 'Waiting for player' : undefined,
+    remainingLabel:
+      waitingForFirstPlayer
+        ? 'Waiting for player'
+        : remainingSeconds === 0
+          ? 'Taking longer than estimated'
+          : undefined,
     percent,
     ready: false,
     statusText,
