@@ -1981,21 +1981,6 @@ async function createInstancesForSpec(
     }
   }
 
-  const worldLaunchLockId = selectedWorld ? `launching:${randomUUID()}` : undefined;
-  let worldLaunchLockAcquired = false;
-  if (selectedWorld && worldLaunchLockId) {
-    worldLaunchLockAcquired = await acquireWorldLaunchLock(
-      selectedWorld,
-      gameId,
-      worldLaunchLockId,
-    );
-    if (!worldLaunchLockAcquired) {
-      throw new Error(
-        `World ${selectedWorld.worldId} is already launching or running an active server`,
-      );
-    }
-  }
-
   const subnetIds = parseSubnets(
     selectedProfile?.subnetIds,
     spec.subnetIds ?? (spec.subnetId ? [spec.subnetId] : []),
@@ -2111,6 +2096,21 @@ async function createInstancesForSpec(
   };
 
   const now = new Date().toISOString();
+  const worldLaunchLockId = selectedWorld ? `launching:${randomUUID()}` : undefined;
+  let worldLaunchLockAcquired = false;
+  if (selectedWorld && worldLaunchLockId) {
+    worldLaunchLockAcquired = await acquireWorldLaunchLock(
+      selectedWorld,
+      gameId,
+      worldLaunchLockId,
+    );
+    if (!worldLaunchLockAcquired) {
+      throw new Error(
+        `World ${selectedWorld.worldId} is already launching or running an active server`,
+      );
+    }
+  }
+
   let createdIds: string[] = [];
   let launchedInstanceType = instanceType;
   let launchedSpot: Awaited<ReturnType<typeof resolveSpotLaunchChoice>> | undefined;
