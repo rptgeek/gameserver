@@ -66,6 +66,45 @@ body {
   background: rgba(9, 14, 31, 0.88);
 }
 
+.spot-interruption-alert {
+  display: grid;
+  gap: 0.25rem;
+  margin: 0.75rem 0;
+  padding: 0.8rem 0.9rem;
+  border: 1px solid rgba(255, 108, 136, 0.72);
+  border-radius: 10px;
+  background: rgba(105, 20, 42, 0.42);
+  color: #ffe5eb;
+  box-shadow: 0 0 0 1px rgba(255, 108, 136, 0.08) inset;
+}
+
+.spot-interruption-alert strong {
+  color: #ff9bad;
+}
+
+.spot-interruption-alert time {
+  color: #d9aab4;
+  font-size: 0.78rem;
+}
+
+.spot-interruption-alert.compact {
+  margin: 0.45rem 0 0;
+  padding: 0.55rem 0.65rem;
+  min-width: 230px;
+  font-size: 0.78rem;
+}
+
+.fleet-spot-notice {
+  margin: 0 1rem 1rem;
+  padding: 0 1rem;
+  border-left: 4px solid var(--danger);
+}
+
+.fleet-spot-notice > span {
+  color: #ffb2c0;
+  font-weight: 700;
+}
+
 .top-bar {
   position: sticky;
   top: 0;

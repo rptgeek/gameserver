@@ -89,6 +89,12 @@ interface LaunchPhaseMarker {
   atMs?: number;
 }
 
+interface SpotInterruptionNotice {
+  state: 'detected' | 'backup-complete' | 'backup-failed' | 'reclaimed';
+  message: string;
+  timestamp?: string;
+}
+
 const LAUNCH_LOG_HISTORY_LIMIT = 800;
 
 interface Toast {
@@ -155,6 +161,53 @@ function statusClassName(raw?: string): string {
 
 function displayUnknown(value: unknown): string {
   return typeof value === 'string' && value.trim() ? value : '—';
+}
+
+function spotInterruptionNotice(
+  instance: ServerInstance,
+  logLines: string[] = [],
+): SpotInterruptionNotice | undefined {
+  if (instance.terminationReasonCode === 'Server.SpotInstanceTermination') {
+    return {
+      state: 'reclaimed',
+      message: 'AWS reclaimed this Spot instance. The shutdown backup was requested before termination.',
+      timestamp: instance.terminatedAt,
+    };
+  }
+
+  const line = [...logLines].reverse().find((candidate) => candidate.includes('SPOT_INTERRUPTION'));
+  if (!line) return undefined;
+  const status = line.match(/\bstatus=([a-z-]+)/i)?.[1]?.toLowerCase();
+  const timestamp = line.match(/\b(?:completedAt|failedAt|detectedAt)=([^\s]+)/i)?.[1];
+  if (status === 'backup-complete') {
+    return {
+      state: 'backup-complete',
+      message: 'AWS is reclaiming this Spot instance. The world backup completed; shutdown is in progress.',
+      timestamp,
+    };
+  }
+  if (status === 'backup-failed') {
+    return {
+      state: 'backup-failed',
+      message: 'AWS is reclaiming this Spot instance, and the emergency world backup reported a failure.',
+      timestamp,
+    };
+  }
+  return {
+    state: 'detected',
+    message: 'AWS is reclaiming this Spot instance. Saving the world before shutdown.',
+    timestamp,
+  };
+}
+
+function SpotInterruptionAlert({ notice, compact = false }: { notice: SpotInterruptionNotice; compact?: boolean }) {
+  return (
+    <div className={`spot-interruption-alert ${compact ? 'compact' : ''}`} role="alert">
+      <strong>{notice.state === 'reclaimed' ? 'Spot instance reclaimed' : 'Spot interruption warning'}</strong>
+      <span>{notice.message}</span>
+      {notice.timestamp ? <time dateTime={notice.timestamp}>{prettyDate(notice.timestamp)}</time> : null}
+    </div>
+  );
 }
 
 function instanceType(instance: ServerInstance): string {
@@ -701,6 +754,7 @@ export default function App() {
   const selectedLogInstanceId = selectedInstance ? instanceId(selectedInstance) : '';
 
   const pollRef = useRef<Record<string, number>>({});
+  const spotNoticeNotifiedRef = useRef<Set<string>>(new Set());
   const logStreamRef = useRef<AbortController | null>(null);
   const runtimeServerEditorRef = useRef<HTMLTextAreaElement | null>(null);
   const runtimeWorldEditorRef = useRef<HTMLTextAreaElement | null>(null);
@@ -947,13 +1001,22 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    for (const instance of instances) {
+      const id = instanceId(instance);
+      const notice = spotInterruptionNotice(instance, launchLogLines[id] ?? []);
+      if (!notice || spotNoticeNotifiedRef.current.has(id)) continue;
+      spotNoticeNotifiedRef.current.add(id);
+      notify('error', `${instance.worldName || gameName(instance)}: ${notice.message}`);
+    }
+  }, [instances, launchLogLines]);
+
+  useEffect(() => {
     if (!user) {
       return;
     }
 
     let cancelled = false;
     const pollLaunchProgress = async () => {
-      const now = Date.now();
       const tracked = instances
         .filter((instance) => {
           const startedAt = launchStartedAt(instance);
@@ -961,11 +1024,10 @@ export default function App() {
           if (!startedAt || ['stopped', 'terminated', 'error'].includes(status)) {
             return false;
           }
-          const ageSeconds = (now - startedAt) / 1000;
           return (
             status === 'launching' ||
             status === 'starting' ||
-            (status === 'running' && ageSeconds < TOTAL_LAUNCH_SECONDS + 600)
+            status === 'running'
           );
         })
         .slice(0, 6);
@@ -1754,6 +1816,17 @@ export default function App() {
   const visibleWorlds = selectedGameId && selectedGameId !== 'all'
     ? worlds.filter((world) => worldGameId(world) === selectedGameId)
     : [];
+  const fleetSpotNotice = instances
+    .map((instance) => ({
+      instance,
+      notice: spotInterruptionNotice(instance, launchLogLines[instanceId(instance)] ?? []),
+    }))
+    .filter((entry): entry is { instance: ServerInstance; notice: SpotInterruptionNotice } => Boolean(entry.notice))
+    .sort((a, b) => {
+      const aTime = Date.parse(a.notice.timestamp || a.instance.updatedAt?.toString() || '') || 0;
+      const bTime = Date.parse(b.notice.timestamp || b.instance.updatedAt?.toString() || '') || 0;
+      return bTime - aTime;
+    })[0];
 
   if (bootstrapping) {
     return (
@@ -1802,6 +1875,13 @@ export default function App() {
           </button>
         </div>
       </header>
+
+      {fleetSpotNotice ? (
+        <section className="fleet-spot-notice" aria-label="AWS Spot interruption notice">
+          <span>{fleetSpotNotice.instance.worldName || gameName(fleetSpotNotice.instance)}</span>
+          <SpotInterruptionAlert notice={fleetSpotNotice.notice} />
+        </section>
+      ) : null}
 
       <main className={`dashboard-grid ${showSavedWorlds ? '' : 'saved-worlds-collapsed'}`}>
         <aside className={`panel saved-worlds-panel ${showSavedWorlds ? '' : 'panel-collapsed'}`}>
@@ -1859,6 +1939,12 @@ export default function App() {
                     const active = runtime.status !== 'offline';
                     const status = runtime.instance ? playerStatuses[instanceId(runtime.instance)] : undefined;
                     const launchProgress = runtime.instance ? launchProgressFor(runtime.instance) : undefined;
+                    const spotNotice = runtime.instance
+                      ? spotInterruptionNotice(
+                          runtime.instance,
+                          launchLogLines[instanceId(runtime.instance)] ?? [],
+                        )
+                      : undefined;
                     const busy = worldBusyState(world);
                     const runtimeInfo = worldRuntimeInfo[worldKey(world)];
                     const inviteCode = runtimeInfo?.inviteCode;
@@ -1875,6 +1961,7 @@ export default function App() {
                           </div>
                           <span className={statusClassName(runtime.status)}>{runtime.status}</span>
                         </div>
+                        {spotNotice ? <SpotInterruptionAlert notice={spotNotice} /> : null}
                         {launchProgress && <LaunchProgressView progress={launchProgress} />}
                         <div className="world-meta">
                           <span>Bucket</span>
@@ -2036,6 +2123,7 @@ export default function App() {
                     const id = instanceId(instance);
                     const disabled = isOperationRunning(instance);
                     const launchProgress = launchProgressFor(instance);
+                    const spotNotice = spotInterruptionNotice(instance, launchLogLines[id] ?? []);
                     return (
                       <tr key={id}>
                         <td>{gameName(instance)}</td>
@@ -2044,6 +2132,7 @@ export default function App() {
                         <td>{instance.worldName || instance.selectedWorldId || '—'}</td>
                         <td>
                           <span className={statusClassName(instance.status)}>{normalizeStatus(instance.status)}</span>
+                          {spotNotice ? <SpotInterruptionAlert notice={spotNotice} compact /> : null}
                           {launchProgress && <LaunchProgressView progress={launchProgress} compact />}
                         </td>
                         <td>{instance.region || '—'}</td>
@@ -2179,6 +2268,19 @@ export default function App() {
               <div className="tab-content">
                 {detailTab === 'overview' && (
                   <article className="overview">
+                    {spotInterruptionNotice(
+                      selectedInstance,
+                      launchLogLines[instanceId(selectedInstance)] ?? [],
+                    ) ? (
+                      <div className="overview-wide">
+                        <SpotInterruptionAlert
+                          notice={spotInterruptionNotice(
+                            selectedInstance,
+                            launchLogLines[instanceId(selectedInstance)] ?? [],
+                          )!}
+                        />
+                      </div>
+                    ) : null}
                     <div className="kv">
                       <span>Instance</span>
                       <strong>{instanceId(selectedInstance)}</strong>

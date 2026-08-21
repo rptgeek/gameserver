@@ -97,6 +97,10 @@ export interface InstanceItem {
   privateIp?: string;
   startedAt?: string;
   spotPriceAtLaunch?: string;
+  terminationReasonCode?: string;
+  terminationReason?: string;
+  stateTransitionReason?: string;
+  terminatedAt?: string;
   lastBackupAt?: string;
   serverName?: string;
   worldBucket?: string;

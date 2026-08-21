@@ -920,7 +920,14 @@ while true; do
   if notice="$(curl -fsS --max-time 1 "${NOTICE_URL}" || true)"; then
     if [[ "${notice}" == *\"action\"* ]]; then
       GAME_SERVICE='{{GAME_SERVICE}}'
-      "/opt/${GAME_SERVICE}-tools/upload-state.sh" || true
+      INTERRUPTION_LOG="/var/log/${GAME_SERVICE}/bootstrap.log"
+      detected_at="$(date -u +%Y-%m-%dT%H:%M:%S%:z)"
+      printf 'SPOT_INTERRUPTION status=detected detectedAt=%s notice=%s\n' "${detected_at}" "${notice}" >> "${INTERRUPTION_LOG}"
+      if "/opt/${GAME_SERVICE}-tools/upload-state.sh"; then
+        printf 'SPOT_INTERRUPTION status=backup-complete detectedAt=%s completedAt=%s\n' "${detected_at}" "$(date -u +%Y-%m-%dT%H:%M:%S%:z)" >> "${INTERRUPTION_LOG}"
+      else
+        printf 'SPOT_INTERRUPTION status=backup-failed detectedAt=%s failedAt=%s\n' "${detected_at}" "$(date -u +%Y-%m-%dT%H:%M:%S%:z)" >> "${INTERRUPTION_LOG}"
+      fi
       /usr/bin/systemctl stop "${GAME_SERVICE}-server.service" || true
       /usr/sbin/shutdown -h now "Spot termination notice"
       exit 0

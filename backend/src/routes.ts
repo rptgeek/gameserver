@@ -1575,8 +1575,19 @@ type Ec2InstanceSnapshot = {
   publicIp?: string;
   privateIp?: string;
   startedAt?: string;
+  terminationReasonCode?: string;
+  terminationReason?: string;
+  stateTransitionReason?: string;
+  terminatedAt?: string;
   notFound?: boolean;
 };
+
+function terminatedAtFromTransitionReason(reason: string | undefined): string | undefined {
+  const match = reason?.match(/\(([^)]+)\)/);
+  if (!match?.[1]) return undefined;
+  const parsed = Date.parse(match[1]);
+  return Number.isNaN(parsed) ? undefined : new Date(parsed).toISOString();
+}
 
 function isEc2InstanceNotFoundError(error: unknown): boolean {
   if (!error || typeof error !== "object") return false;
@@ -1593,11 +1604,16 @@ async function describeEc2InstanceSnapshot(instanceId: string): Promise<Ec2Insta
     );
     const instance = result.Reservations?.[0]?.Instances?.[0];
     if (!instance) return undefined;
+    const stateTransitionReason = instance.StateTransitionReason;
     return {
       ec2State: instance.State?.Name,
       publicIp: instance.PublicIpAddress,
       privateIp: instance.PrivateIpAddress,
       startedAt: instance.LaunchTime?.toISOString(),
+      terminationReasonCode: instance.StateReason?.Code,
+      terminationReason: instance.StateReason?.Message,
+      stateTransitionReason,
+      terminatedAt: terminatedAtFromTransitionReason(stateTransitionReason),
     };
   } catch (error) {
     if (isEc2InstanceNotFoundError(error)) {
@@ -1661,6 +1677,10 @@ async function hydrateInstanceFromEc2(instance: InstanceItem): Promise<InstanceI
     publicIp: snapshot.publicIp,
     privateIp: snapshot.privateIp,
     startedAt: snapshot.startedAt ?? instance.startedAt,
+    terminationReasonCode: snapshot.terminationReasonCode ?? instance.terminationReasonCode,
+    terminationReason: snapshot.terminationReason ?? instance.terminationReason,
+    stateTransitionReason: snapshot.stateTransitionReason ?? instance.stateTransitionReason,
+    terminatedAt: snapshot.terminatedAt ?? instance.terminatedAt,
     status:
       instance.status === "launching" && snapshot.ec2State === "running"
         ? "running"
@@ -1674,6 +1694,10 @@ async function hydrateInstanceFromEc2(instance: InstanceItem): Promise<InstanceI
     normalizedNext.publicIp !== instance.publicIp ||
     normalizedNext.privateIp !== instance.privateIp ||
     normalizedNext.startedAt !== instance.startedAt ||
+    normalizedNext.terminationReasonCode !== instance.terminationReasonCode ||
+    normalizedNext.terminationReason !== instance.terminationReason ||
+    normalizedNext.stateTransitionReason !== instance.stateTransitionReason ||
+    normalizedNext.terminatedAt !== instance.terminatedAt ||
     normalizedNext.status !== instance.status
   ) {
     await instanceRepository.put(normalizedNext);

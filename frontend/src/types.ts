@@ -86,6 +86,10 @@ export interface ServerInstance {
   publicIp?: string;
   startedAt?: string;
   createdAt?: string;
+  terminationReasonCode?: string;
+  terminationReason?: string;
+  stateTransitionReason?: string;
+  terminatedAt?: string;
   [key: string]: unknown;
 }
 
