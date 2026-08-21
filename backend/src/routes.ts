@@ -986,6 +986,85 @@ function worldConfigKey(worldPrefix: string): string {
   return `${worldPrefix.replace(/\/+$/, "")}/config/serverconfig.xml`;
 }
 
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function replaceServerConfigProperty(
+  configXml: string,
+  propertyName: string,
+  value: string,
+): string {
+  const escapedValue = value
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+  const propertyPattern = new RegExp(
+    `(<property\\s+name=["']${propertyName}["']\\s+value=["'])[^"']*(["'][^>]*>)`,
+    "i",
+  );
+  return configXml.replace(propertyPattern, `$1${escapedValue}$2`);
+}
+
+async function align7d2dConfigWithUploadedWorld(
+  bucket: string,
+  worldPrefix: string,
+  selectedWorldName: string,
+): Promise<void> {
+  const stateRoot = `${worldPrefix.replace(/\/+$/, "")}/state`;
+  const keys = await listS3Keys(bucket, `${stateRoot}/`);
+  const generatedWorlds = new Set<string>();
+  const saveGamesByWorld = new Map<string, Set<string>>();
+
+  for (const key of keys) {
+    const generatedMatch = key.match(
+      new RegExp(`^${escapeRegex(stateRoot)}/GeneratedWorlds/([^/]+)/`),
+    );
+    if (generatedMatch?.[1]) generatedWorlds.add(generatedMatch[1]);
+
+    const saveMatch = key.match(
+      new RegExp(`^${escapeRegex(stateRoot)}/Saves/([^/]+)/([^/]+)/`),
+    );
+    if (saveMatch?.[1] && saveMatch[2]) {
+      const gameNames = saveGamesByWorld.get(saveMatch[1]) ?? new Set<string>();
+      gameNames.add(saveMatch[2]);
+      saveGamesByWorld.set(saveMatch[1], gameNames);
+    }
+  }
+
+  const generatedWorldName = generatedWorlds.has(selectedWorldName)
+    ? selectedWorldName
+    : generatedWorlds.size === 1
+      ? Array.from(generatedWorlds)[0]
+      : undefined;
+  if (!generatedWorldName) return;
+
+  const saveGameNames = saveGamesByWorld.get(generatedWorldName);
+  if (!saveGameNames || saveGameNames.size !== 1) return;
+  const saveGameName = Array.from(saveGameNames)[0];
+
+  const configKey = worldConfigKey(worldPrefix);
+  const configXml = await getS3ObjectText(bucket, configKey);
+  if (!configXml) return;
+
+  const alignedConfig = replaceServerConfigProperty(
+    replaceServerConfigProperty(configXml, "GameWorld", generatedWorldName),
+    "GameName",
+    saveGameName,
+  );
+  if (alignedConfig === configXml) return;
+
+  await s3Client.send(
+    new PutObjectCommand({
+      Bucket: bucket,
+      Key: configKey,
+      Body: alignedConfig,
+      ContentType: "application/xml",
+    }),
+  );
+}
+
 function windroseConfigRoot(worldPrefix: string): string {
   return `${worldPrefix.replace(/\/+$/, "")}/config/windrose`;
 }
@@ -1964,6 +2043,13 @@ async function createInstancesForSpec(
   const worldPrefix = canonicalWorldPrefix(basePrefixSafe, gameId, worldSuffix);
   const worldLabel = selectedWorld?.name || spec.worldName || worldSuffix;
   const worldBucket = profile.worldBucket || "gameserver-state-example";
+  if (gameId.toLowerCase() === "7d2d" && selectedWorld) {
+    await align7d2dConfigWithUploadedWorld(
+      worldBucket,
+      worldPrefix,
+      selectedWorld.name,
+    );
+  }
   const launchImage = await resolveLaunchImageChoice(
     spec.amiId,
     profile.amiId,
