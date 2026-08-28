@@ -81,6 +81,8 @@ export interface WorldPresetItem {
   saveVersion?: string;
   saveVersionUpdatedAt?: string;
   lastBackupAt?: string;
+  clonedFromWorldId?: string;
+  restoredFromRestorePointId?: string;
   createdAt: string;
   updatedAt: string;
   createdBy?: string;
@@ -235,6 +237,16 @@ export interface SaveWorldRequest {
 }
 
 export interface CopyWorldRequest {
+  name?: string;
+  description?: string;
+}
+
+export interface CreateRestorePointRequest {
+  name?: string;
+  description?: string;
+}
+
+export interface RestoreWorldRequest {
   name?: string;
   description?: string;
 }

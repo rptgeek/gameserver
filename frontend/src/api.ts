@@ -7,6 +7,7 @@ import type {
   LogType,
   OperationResult,
   PlayerStatus,
+  RestorePoint,
   ServerInstance,
   WorldRuntimeInfo,
   WorldServerConfig,
@@ -310,6 +311,54 @@ export async function deleteWorld(gameId: string, worldId: string): Promise<void
     {
       method: 'DELETE',
     },
+  );
+}
+
+export async function listRestorePoints(gameId: string, worldId: string): Promise<RestorePoint[]> {
+  const payload = await request<{ restorePoints?: RestorePoint[] } | RestorePoint[]>(
+    `/v1/games/${encodeURIComponent(gameId)}/worlds/${encodeURIComponent(worldId)}/restore-points`,
+  );
+  return Array.isArray(payload) ? payload : normalizeList<RestorePoint>(payload, ['restorePoints']);
+}
+
+export async function createRestorePoint(gameId: string, worldId: string, payload: {
+  name?: string;
+  description?: string;
+} = {}): Promise<RestorePoint> {
+  const result = await request<{ restorePoint?: RestorePoint } | RestorePoint>(
+    `/v1/games/${encodeURIComponent(gameId)}/worlds/${encodeURIComponent(worldId)}/restore-points`,
+    { method: 'POST', body: payload },
+  );
+  if (!result || typeof result !== 'object') {
+    throw new Error('Invalid restore point response');
+  }
+  return 'restorePoint' in result ? (result.restorePoint as RestorePoint) : (result as RestorePoint);
+}
+
+export async function restoreWorldFromPoint(
+  gameId: string,
+  worldId: string,
+  restorePointId: string,
+  payload: { name?: string; description?: string } = {},
+): Promise<WorldPreset> {
+  const result = await request<{ world?: WorldPreset } | WorldPreset>(
+    `/v1/games/${encodeURIComponent(gameId)}/worlds/${encodeURIComponent(worldId)}/restore-points/${encodeURIComponent(restorePointId)}/restore`,
+    { method: 'POST', body: payload },
+  );
+  if (!result || typeof result !== 'object') {
+    throw new Error('Invalid restored world response');
+  }
+  return 'world' in result ? (result.world as WorldPreset) : (result as WorldPreset);
+}
+
+export async function deleteRestorePoint(
+  gameId: string,
+  worldId: string,
+  restorePointId: string,
+): Promise<void> {
+  await request(
+    `/v1/games/${encodeURIComponent(gameId)}/worlds/${encodeURIComponent(worldId)}/restore-points/${encodeURIComponent(restorePointId)}`,
+    { method: 'DELETE' },
   );
 }
 

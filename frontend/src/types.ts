@@ -33,7 +33,25 @@ export interface WorldPreset {
   worldSeed: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
+  lastBackupAt?: string;
+  clonedFromWorldId?: string;
+  restoredFromRestorePointId?: string;
   [key: string]: unknown;
+}
+
+export interface RestorePoint {
+  schemaVersion: 1;
+  restorePointId: string;
+  name: string;
+  description?: string;
+  createdAt: string;
+  createdBy: string;
+  sourceWorldId: string;
+  sourceWorldName: string;
+  sourceWorldPrefix: string;
+  objectCount: number;
+  sizeBytes: number;
+  sourceLatestAt?: string;
 }
 
 export interface WorldServerConfig {

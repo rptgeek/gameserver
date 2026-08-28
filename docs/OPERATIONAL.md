@@ -68,6 +68,24 @@ All tracked operations use this state machine:
 - Game state objects in S3: versioned with lifecycle rule retaining recent state for recovery and removing aged objects per policy (for example 30–90 days).
 - Server/service logs should not be purged from instance immediately; collect on demand before termination when possible.
 
+## Isolated world clones and managed restore points
+
+- **Clone & launch** copies only the source world's current `state/` and `config/` trees into a
+  newly generated world prefix. The original and clone never share an autosave destination, so
+  subsequent uploads from either server cannot overwrite the other.
+- A 7D2D restore point is a server-side S3 snapshot stored at
+  `$WORLD_PREFIX/restore-points/$RESTORE_POINT_ID/snapshot/`, with a JSON manifest beside it.
+- Periodic uploads sync only to `$WORLD_PREFIX/state/`; they do not overwrite or purge restore
+  points.
+- Restoring a point always creates a new world record and a new S3 world prefix. It never rolls
+  the source world backward in place.
+- Deleting an individual restore point removes its snapshot from the active S3 view. Because the
+  bucket is versioned, prior object versions may remain recoverable until the bucket lifecycle
+  policy expires them.
+- Deleting a saved world removes its live data and all restore-point objects under its prefix.
+- Restore-point creation captures the latest completed S3 upload. When the source server is
+  running, that can trail in-memory game state by up to the configured backup interval.
+
 ## Status and health checks
 
 - `status-game-spot.sh` currently maps to:

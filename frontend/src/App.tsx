@@ -8,10 +8,12 @@ import {
 } from './auth';
 import {
   copyWorld,
+  createRestorePoint,
   createInstance,
   createProfile,
   createWorld,
   deleteWorld,
+  deleteRestorePoint,
   getConfig,
   getInstance,
   getLogs,
@@ -20,11 +22,13 @@ import {
   getWorldRuntimeInfo,
   getWorldServerConfig,
   listProfiles,
+  listRestorePoints,
   listWorlds,
   listGames,
   listInstances,
   restartGameServer,
   restartInstance,
+  restoreWorldFromPoint,
   sendGameServerCommand,
   startGameServer,
   startInstance,
@@ -44,6 +48,7 @@ import type {
   LogType,
   OperationResult,
   PlayerStatus,
+  RestorePoint,
   ServerInstance,
   ToastType,
   WorldPreset,
@@ -145,6 +150,14 @@ function prettyDate(iso?: string): string {
     return iso;
   }
   return parsed.toLocaleString();
+}
+
+function prettyBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const unitIndex = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const value = bytes / 1024 ** unitIndex;
+  return `${value >= 10 || unitIndex === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unitIndex]}`;
 }
 
 function normalizeStatus(raw?: string): string {
@@ -743,6 +756,12 @@ export default function App() {
   const [worldDescription, setWorldDescription] = useState('');
   const [worldSeedText, setWorldSeedText] = useState('{\n  "seed": ""\n}');
   const [busyWorldIds, setBusyWorldIds] = useState<Record<string, 'copying' | 'deleting' | 'launching'>>({});
+  const [restorePointWorld, setRestorePointWorld] = useState<WorldPreset | null>(null);
+  const [restorePoints, setRestorePoints] = useState<RestorePoint[]>([]);
+  const [restorePointsLoading, setRestorePointsLoading] = useState(false);
+  const [restorePointBusyId, setRestorePointBusyId] = useState<string | null>(null);
+  const [restorePointName, setRestorePointName] = useState('');
+  const [restorePointDescription, setRestorePointDescription] = useState('');
   const [instanceCreating, setInstanceCreating] = useState(false);
   const creatingInstanceRef = useRef(false);
   const launchingWorldKeysRef = useRef<Set<string>>(new Set());
@@ -1496,6 +1515,10 @@ export default function App() {
       notify('error', 'Select a game');
       return;
     }
+    if (addForm.gameId.toLowerCase() === '7d2d' && !addForm.selectedWorldId) {
+      notify('error', 'Select a saved world before launching 7D2D');
+      return;
+    }
     if (creatingInstanceRef.current) {
       return;
     }
@@ -1664,7 +1687,7 @@ export default function App() {
       notify('error', 'World is missing a game id or world id');
       return;
     }
-    const name = window.prompt('Name for the copied world', `Copy of ${world.name}`);
+    const name = window.prompt('Name for the isolated server save', `${world.name} — branch`);
     if (name === null) {
       return;
     }
@@ -1677,11 +1700,101 @@ export default function App() {
     try {
       const copied = await copyWorld(gameId, world.worldId, { name: name.trim() });
       setWorlds((current) => [copied, ...current]);
-      notify('success', `Copied ${world.name}`);
+      notify('success', `Created an isolated save from ${world.name}`);
+      await handleConfigureWorldLaunch(copied);
     } catch (error) {
       notify('error', error instanceof Error ? error.message : 'Unable to copy world');
     } finally {
       setWorldBusy(world);
+    }
+  };
+
+  const handleOpenRestorePoints = async (world: WorldPreset) => {
+    const gameId = worldGameId(world);
+    if (!gameId || !world.worldId) {
+      notify('error', 'World is missing a game id or world id');
+      return;
+    }
+    setRestorePointWorld(world);
+    setRestorePoints([]);
+    setRestorePointName('');
+    setRestorePointDescription('');
+    setRestorePointsLoading(true);
+    try {
+      setRestorePoints(await listRestorePoints(gameId, world.worldId));
+    } catch (error) {
+      notify('error', error instanceof Error ? error.message : 'Unable to load restore points');
+    } finally {
+      setRestorePointsLoading(false);
+    }
+  };
+
+  const handleCreateRestorePoint = async () => {
+    if (!restorePointWorld) return;
+    const gameId = worldGameId(restorePointWorld);
+    setRestorePointBusyId('creating');
+    try {
+      const restorePoint = await createRestorePoint(gameId, restorePointWorld.worldId, {
+        name: restorePointName.trim() || undefined,
+        description: restorePointDescription.trim() || undefined,
+      });
+      setRestorePoints((current) => [restorePoint, ...current]);
+      setRestorePointName('');
+      setRestorePointDescription('');
+      notify('success', `Preserved ${restorePoint.name}`);
+    } catch (error) {
+      notify('error', error instanceof Error ? error.message : 'Unable to create restore point');
+    } finally {
+      setRestorePointBusyId(null);
+    }
+  };
+
+  const handleRestoreFromPoint = async (restorePoint: RestorePoint) => {
+    if (!restorePointWorld) return;
+    const gameId = worldGameId(restorePointWorld);
+    const name = window.prompt(
+      'Name for the restored server save',
+      `${restorePointWorld.name} — restored ${new Date(restorePoint.createdAt).toLocaleDateString()}`,
+    );
+    if (name === null) return;
+    if (!name.trim()) {
+      notify('error', 'World name is required');
+      return;
+    }
+    setRestorePointBusyId(restorePoint.restorePointId);
+    try {
+      const restored = await restoreWorldFromPoint(
+        gameId,
+        restorePointWorld.worldId,
+        restorePoint.restorePointId,
+        { name: name.trim() },
+      );
+      setWorlds((current) => [restored, ...current]);
+      setRestorePointWorld(null);
+      notify('success', `Restored ${restorePoint.name} into a new isolated save`);
+      await handleConfigureWorldLaunch(restored);
+    } catch (error) {
+      notify('error', error instanceof Error ? error.message : 'Unable to restore world');
+    } finally {
+      setRestorePointBusyId(null);
+    }
+  };
+
+  const handleDeleteRestorePoint = async (restorePoint: RestorePoint) => {
+    if (!restorePointWorld) return;
+    if (!window.confirm(`Delete restore point “${restorePoint.name}”? This cannot be undone from the console.`)) {
+      return;
+    }
+    const gameId = worldGameId(restorePointWorld);
+    setRestorePointBusyId(restorePoint.restorePointId);
+    try {
+      await deleteRestorePoint(gameId, restorePointWorld.worldId, restorePoint.restorePointId);
+      setRestorePoints((current) => current.filter((item) => item.restorePointId !== restorePoint.restorePointId));
+      notify('success', `Deleted ${restorePoint.name}`);
+    } catch (error) {
+      notify('error', error instanceof Error ? error.message : 'Unable to delete restore point');
+    } finally {
+      setRestorePointBusyId(null);
     }
   };
 
@@ -1814,7 +1927,9 @@ export default function App() {
       lastBackupAt:
         typeof latest?.lastBackupAt === 'string'
           ? latest.lastBackupAt
-          : undefined,
+          : typeof world.lastBackupAt === 'string'
+            ? world.lastBackupAt
+            : undefined,
     };
   };
 
@@ -1975,6 +2090,17 @@ export default function App() {
                           <strong>{worldS3Prefix(world)}/state</strong>
                           <span>Last backup</span>
                           <strong>{prettyDate(runtime.lastBackupAt)}</strong>
+                          {typeof world.restoredFromRestorePointId === 'string' ? (
+                            <>
+                              <span>Origin</span>
+                              <strong className="world-origin">Restore point</strong>
+                            </>
+                          ) : typeof world.clonedFromWorldId === 'string' ? (
+                            <>
+                              <span>Origin</span>
+                              <strong className="world-origin">Isolated clone</strong>
+                            </>
+                          ) : null}
                           <span>Public IP</span>
                           <CopyableIp ip={runtime.publicIp} onCopy={handleCopyIpAddress} />
                           <span>Players</span>
@@ -2047,8 +2173,18 @@ export default function App() {
                             disabled={Boolean(busy)}
                             onClick={() => handleCopyWorld(world)}
                           >
-                            {busy === 'copying' ? 'Copying...' : 'Copy'}
+                            {busy === 'copying' ? 'Cloning save...' : 'Clone & launch'}
                           </button>
+                          {worldGameId(world).toLowerCase() === '7d2d' ? (
+                            <button
+                              type="button"
+                              className="btn btn-small btn-restore"
+                              disabled={Boolean(busy)}
+                              onClick={() => handleOpenRestorePoints(world)}
+                            >
+                              Restore points
+                            </button>
+                          ) : null}
                           {inviteCode && (
                             <button
                               type="button"
@@ -2560,6 +2696,114 @@ export default function App() {
         </section>
         </div>
       </main>
+
+      {restorePointWorld ? (
+        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="restore-points-title">
+          <div className="modal restore-points-modal">
+            <div className="restore-points-heading">
+              <div>
+                <span className="eyebrow">Save history</span>
+                <h3 id="restore-points-title">Restore points · {restorePointWorld.name}</h3>
+                <p>
+                  Preserve the latest uploaded save outside the autosave path. Restore points remain until you delete
+                  one or delete this saved world.
+                </p>
+              </div>
+              <button
+                type="button"
+                className="btn btn-small"
+                disabled={Boolean(restorePointBusyId)}
+                onClick={() => setRestorePointWorld(null)}
+                aria-label="Close restore points"
+              >
+                Close
+              </button>
+            </div>
+
+            <section className="restore-point-create" aria-labelledby="create-restore-point-title">
+              <div>
+                <h4 id="create-restore-point-title">Pin the current save</h4>
+                <p>Captures the latest completed S3 autosave; a running server may be up to one backup interval ahead.</p>
+              </div>
+              <label>
+                Label
+                <input
+                  value={restorePointName}
+                  maxLength={120}
+                  placeholder="Before the horde night"
+                  onChange={(event) => setRestorePointName(event.target.value)}
+                />
+              </label>
+              <label>
+                Note <span className="optional-label">optional</span>
+                <input
+                  value={restorePointDescription}
+                  maxLength={500}
+                  placeholder="What makes this point worth keeping?"
+                  onChange={(event) => setRestorePointDescription(event.target.value)}
+                />
+              </label>
+              <button
+                type="button"
+                className="btn btn-success"
+                disabled={Boolean(restorePointBusyId)}
+                onClick={handleCreateRestorePoint}
+              >
+                {restorePointBusyId === 'creating' ? 'Preserving save…' : 'Create restore point'}
+              </button>
+            </section>
+
+            <section className="restore-point-ledger" aria-label="Available restore points">
+              {restorePointsLoading ? (
+                <div className="empty">Loading restore points…</div>
+              ) : restorePoints.length === 0 ? (
+                <div className="empty">No pinned saves yet. Autosaves continue normally in the live world.</div>
+              ) : (
+                restorePoints.map((restorePoint, index) => {
+                  const busy = restorePointBusyId === restorePoint.restorePointId;
+                  return (
+                    <article className="restore-point-row" key={restorePoint.restorePointId}>
+                      <div className="restore-point-index" aria-hidden="true">
+                        {String(restorePoints.length - index).padStart(2, '0')}
+                      </div>
+                      <div className="restore-point-copy">
+                        <div className="restore-point-title-row">
+                          <h4>{restorePoint.name}</h4>
+                          <time dateTime={restorePoint.createdAt}>{prettyDate(restorePoint.createdAt)}</time>
+                        </div>
+                        {restorePoint.description ? <p>{restorePoint.description}</p> : null}
+                        <div className="restore-point-facts">
+                          <span>{prettyBytes(restorePoint.sizeBytes)}</span>
+                          <span>{restorePoint.objectCount} objects</span>
+                          <span>Save current {prettyDate(restorePoint.sourceLatestAt)}</span>
+                        </div>
+                      </div>
+                      <div className="restore-point-actions">
+                        <button
+                          type="button"
+                          className="btn btn-success btn-small"
+                          disabled={Boolean(restorePointBusyId)}
+                          onClick={() => handleRestoreFromPoint(restorePoint)}
+                        >
+                          {busy ? 'Restoring…' : 'Restore as new server'}
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-danger btn-small"
+                          disabled={Boolean(restorePointBusyId)}
+                          onClick={() => handleDeleteRestorePoint(restorePoint)}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </article>
+                  );
+                })
+              )}
+            </section>
+          </div>
+        </div>
+      ) : null}
 
       {showAddInstance && (
         <div className="modal-backdrop" role="dialog" aria-modal="true">

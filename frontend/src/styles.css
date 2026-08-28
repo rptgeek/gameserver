@@ -752,6 +752,162 @@ tbody tr:hover {
   z-index: 1;
 }
 
+.world-origin {
+  width: max-content;
+  padding: 0.16rem 0.5rem;
+  border: 1px solid rgba(45, 231, 203, 0.38);
+  border-radius: 999px;
+  color: #8ff4e1;
+  background: rgba(45, 231, 203, 0.08);
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.btn-restore {
+  border-color: rgba(255, 195, 92, 0.48);
+  color: #ffe0a3;
+  background: rgba(111, 71, 15, 0.44);
+}
+
+.restore-points-modal {
+  width: min(940px, 96vw);
+  gap: 1rem;
+  padding: 1.2rem;
+  border-color: rgba(255, 195, 92, 0.34);
+  background:
+    linear-gradient(135deg, rgba(255, 195, 92, 0.055), transparent 35%),
+    #0c1530;
+}
+
+.restore-points-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding-bottom: 0.9rem;
+  border-bottom: 1px solid rgba(255, 195, 92, 0.22);
+}
+
+.restore-points-heading h3,
+.restore-point-create h4,
+.restore-point-row h4 {
+  margin: 0;
+}
+
+.restore-points-heading p,
+.restore-point-create p,
+.restore-point-row p {
+  margin: 0.35rem 0 0;
+  color: var(--muted);
+}
+
+.eyebrow {
+  display: block;
+  margin-bottom: 0.25rem;
+  color: #ffc35c;
+  font-size: 0.7rem;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.restore-point-create {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(170px, 0.8fr) minmax(210px, 1fr) auto;
+  gap: 0.75rem;
+  align-items: end;
+  padding: 0.9rem;
+  border: 1px solid rgba(45, 231, 203, 0.22);
+  border-radius: 12px;
+  background: rgba(5, 12, 31, 0.72);
+}
+
+.restore-point-create p {
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.optional-label {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 400;
+}
+
+.restore-point-ledger {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.restore-point-row {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+  gap: 0.85rem;
+  align-items: center;
+  padding: 0.8rem;
+  border: 1px solid rgba(140, 124, 255, 0.2);
+  border-radius: 10px;
+  background: rgba(6, 11, 28, 0.62);
+}
+
+.restore-point-index {
+  align-self: stretch;
+  display: grid;
+  place-items: center;
+  border-right: 1px solid rgba(255, 195, 92, 0.28);
+  color: #ffc35c;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.78rem;
+}
+
+.restore-point-title-row,
+.restore-point-facts,
+.restore-point-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  flex-wrap: wrap;
+}
+
+.restore-point-title-row {
+  justify-content: space-between;
+}
+
+.restore-point-title-row time,
+.restore-point-facts {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.restore-point-facts {
+  margin-top: 0.55rem;
+}
+
+.restore-point-facts span + span::before {
+  content: '·';
+  margin-right: 0.65rem;
+  color: #ffc35c;
+}
+
+.restore-point-actions {
+  justify-content: flex-end;
+}
+
+@media (max-width: 820px) {
+  .restore-point-create,
+  .restore-point-row {
+    grid-template-columns: 1fr;
+  }
+
+  .restore-point-index {
+    display: none;
+  }
+
+  .restore-point-actions {
+    justify-content: flex-start;
+  }
+}
+
 .toast-stack {
   position: fixed;
   right: 1rem;

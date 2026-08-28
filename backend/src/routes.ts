@@ -51,6 +51,8 @@ import {
   WorldPresetItem,
   OperationItem,
   CopyWorldRequest,
+  CreateRestorePointRequest,
+  RestoreWorldRequest,
   SaveProfileRequest,
   SaveWorldRequest,
   UserContext,
@@ -1086,6 +1088,80 @@ function worldPrefixRoot(worldPrefix: string): string {
   return `${worldPrefix.replace(/\/+$/, "")}/`;
 }
 
+interface S3PrefixObject {
+  key: string;
+  size: number;
+  lastModified?: Date;
+}
+
+interface RestorePointManifest {
+  schemaVersion: 1;
+  restorePointId: string;
+  name: string;
+  description?: string;
+  createdAt: string;
+  createdBy: string;
+  sourceWorldId: string;
+  sourceWorldName: string;
+  sourceWorldPrefix: string;
+  objectCount: number;
+  sizeBytes: number;
+  sourceLatestAt?: string;
+}
+
+function restorePointsRoot(worldPrefix: string): string {
+  return `${worldPrefix.replace(/\/+$/, "")}/restore-points`;
+}
+
+function restorePointRoot(worldPrefix: string, restorePointId: string): string {
+  return `${restorePointsRoot(worldPrefix)}/${restorePointId}`;
+}
+
+function restorePointManifestKey(worldPrefix: string, restorePointId: string): string {
+  return `${restorePointRoot(worldPrefix, restorePointId)}/manifest.json`;
+}
+
+function isRestorePointId(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+function parseRestorePointManifest(value: string | undefined): RestorePointManifest | undefined {
+  if (!value) return undefined;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (
+      !isObject(parsed) ||
+      parsed.schemaVersion !== 1 ||
+      typeof parsed.restorePointId !== "string" ||
+      !isRestorePointId(parsed.restorePointId) ||
+      typeof parsed.name !== "string" ||
+      typeof parsed.createdAt !== "string" ||
+      typeof parsed.createdBy !== "string" ||
+      typeof parsed.sourceWorldId !== "string" ||
+      typeof parsed.sourceWorldName !== "string" ||
+      typeof parsed.sourceWorldPrefix !== "string" ||
+      typeof parsed.objectCount !== "number" ||
+      typeof parsed.sizeBytes !== "number"
+    ) {
+      return undefined;
+    }
+    return parsed as unknown as RestorePointManifest;
+  } catch {
+    return undefined;
+  }
+}
+
+async function getRestorePointManifest(
+  bucket: string,
+  worldPrefix: string,
+  restorePointId: string,
+): Promise<RestorePointManifest | undefined> {
+  if (!isRestorePointId(restorePointId)) return undefined;
+  return parseRestorePointManifest(
+    await getS3ObjectText(bucket, restorePointManifestKey(worldPrefix, restorePointId)),
+  );
+}
+
 function profilePk(gameId: string, profileId: string): string {
   return `game-profile#${gameId}#${profileId}`;
 }
@@ -1278,7 +1354,11 @@ function copySourceFor(bucket: string, key: string): string {
 }
 
 async function listS3Keys(bucket: string, prefix: string): Promise<string[]> {
-  const keys: string[] = [];
+  return (await listS3Objects(bucket, prefix)).map((object) => object.key);
+}
+
+async function listS3Objects(bucket: string, prefix: string): Promise<S3PrefixObject[]> {
+  const objects: S3PrefixObject[] = [];
   let continuationToken: string | undefined;
 
   do {
@@ -1291,32 +1371,73 @@ async function listS3Keys(bucket: string, prefix: string): Promise<string[]> {
     );
     for (const object of response.Contents ?? []) {
       if (object.Key) {
-        keys.push(object.Key);
+        objects.push({
+          key: object.Key,
+          size: object.Size ?? 0,
+          lastModified: object.LastModified,
+        });
       }
     }
     continuationToken = response.IsTruncated ? response.NextContinuationToken : undefined;
   } while (continuationToken);
 
-  return keys;
+  return objects;
 }
 
-async function copyS3Prefix(bucket: string, sourcePrefix: string, targetPrefix: string): Promise<number> {
+async function copyS3Prefix(
+  bucket: string,
+  sourcePrefix: string,
+  targetPrefix: string,
+): Promise<{ objectCount: number; sizeBytes: number; latestAt?: string }> {
   const sourceRoot = worldPrefixRoot(sourcePrefix);
   const targetRoot = worldPrefixRoot(targetPrefix);
-  const keys = await listS3Keys(bucket, sourceRoot);
+  const objects = await listS3Objects(bucket, sourceRoot);
 
-  for (const key of keys) {
-    const targetKey = `${targetRoot}${key.slice(sourceRoot.length)}`;
-    await s3Client.send(
-      new CopyObjectCommand({
-        Bucket: bucket,
-        Key: targetKey,
-        CopySource: copySourceFor(bucket, key),
-      }),
-    );
+  for (let index = 0; index < objects.length; index += 20) {
+    const batch = objects.slice(index, index + 20);
+    await Promise.all(batch.map(async (object) => {
+      const targetKey = `${targetRoot}${object.key.slice(sourceRoot.length)}`;
+      await s3Client.send(
+        new CopyObjectCommand({
+          Bucket: bucket,
+          Key: targetKey,
+          CopySource: copySourceFor(bucket, object.key),
+        }),
+      );
+    }));
   }
 
-  return keys.length;
+  const latestTime = objects.reduce(
+    (latest, object) => Math.max(latest, object.lastModified?.getTime() ?? 0),
+    0,
+  );
+  return {
+    objectCount: objects.length,
+    sizeBytes: objects.reduce((total, object) => total + object.size, 0),
+    latestAt: latestTime > 0 ? new Date(latestTime).toISOString() : undefined,
+  };
+}
+
+async function copyLiveWorldData(
+  bucket: string,
+  sourceWorldPrefix: string,
+  targetWorldPrefix: string,
+): Promise<{ objectCount: number; stateObjectCount: number; sizeBytes: number; latestAt?: string }> {
+  const [state, configCopy] = await Promise.all([
+    copyS3Prefix(bucket, `${sourceWorldPrefix.replace(/\/+$/, "")}/state`, `${targetWorldPrefix.replace(/\/+$/, "")}/state`),
+    copyS3Prefix(bucket, `${sourceWorldPrefix.replace(/\/+$/, "")}/config`, `${targetWorldPrefix.replace(/\/+$/, "")}/config`),
+  ]);
+  const latestTimes = [state.latestAt, configCopy.latestAt]
+    .filter((value): value is string => Boolean(value))
+    .map((value) => Date.parse(value));
+  return {
+    objectCount: state.objectCount + configCopy.objectCount,
+    stateObjectCount: state.objectCount,
+    sizeBytes: state.sizeBytes + configCopy.sizeBytes,
+    latestAt: latestTimes.length > 0
+      ? new Date(Math.max(...latestTimes)).toISOString()
+      : undefined,
+  };
 }
 
 async function deleteS3Prefix(bucket: string, prefix: string): Promise<number> {
@@ -1969,6 +2090,12 @@ async function createInstancesForSpec(
     if (!selectedWorld || !isGameWorldForGame(selectedWorld, gameId)) {
       throw new Error(`Unknown world id: ${spec.selectedWorldId}`);
     }
+  }
+
+  if (gameId.toLowerCase() === "7d2d" && !selectedWorld) {
+    throw new Error(
+      "A saved world must be selected when launching 7D2D; create a world preset first for a new save",
+    );
   }
 
   const profileConfig =
@@ -2899,7 +3026,7 @@ export function createRouter(): Router {
       const nextWorldId = randomUUID();
       const sourceLocation = await resolveWorldConfigLocation(gameId, sourceWorld);
       const targetPrefix = siblingWorldPrefix(sourceLocation.worldPrefix, gameId, nextWorldId);
-      const copiedObjectCount = await copyS3Prefix(
+      const copied = await copyLiveWorldData(
         sourceLocation.bucket,
         sourceLocation.worldPrefix,
         targetPrefix,
@@ -2924,12 +3051,208 @@ export function createRouter(): Router {
         currentInstanceId: undefined,
         currentInstanceGameId: undefined,
         lockedAt: undefined,
+        clonedFromWorldId: sourceWorld.worldId,
+        restoredFromRestorePointId: undefined,
+        lastBackupAt: copied.latestAt,
         createdAt: now,
         updatedAt: now,
         createdBy: authReq.user.sub,
       };
       await worldPresetsRepository.put(world);
-      res.status(201).json({ world, copiedObjectCount });
+      res.status(201).json({
+        world,
+        copiedObjectCount: copied.objectCount,
+        copiedSizeBytes: copied.sizeBytes,
+      });
+    }),
+  );
+
+  router.get(
+    "/v1/games/:gameId/worlds/:worldId/restore-points",
+    withAsync(async (req, res) => {
+      const gameId = routeParam(req.params.gameId);
+      const worldId = routeParam(req.params.worldId);
+      const world = await worldPresetsRepository.get(worldPk(gameId, worldId));
+      if (!world || !isGameWorldForGame(world, gameId)) {
+        res.status(404).json({ error: "world not found" });
+        return;
+      }
+      if (gameId.toLowerCase() !== "7d2d") {
+        res.status(400).json({ error: "managed restore points are currently supported for 7D2D" });
+        return;
+      }
+
+      const location = await resolveWorldConfigLocation(gameId, world);
+      const manifestKeys = (await listS3Keys(
+        location.bucket,
+        `${restorePointsRoot(location.worldPrefix)}/`,
+      )).filter((key) => key.endsWith("/manifest.json"));
+      const restorePoints = (await Promise.all(manifestKeys.map(async (key) =>
+        parseRestorePointManifest(await getS3ObjectText(location.bucket, key)),
+      )))
+        .filter((point): point is RestorePointManifest => Boolean(point))
+        .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+      res.json({ restorePoints });
+    }),
+  );
+
+  router.post(
+    "/v1/games/:gameId/worlds/:worldId/restore-points",
+    withAsync(async (req, res) => {
+      const authReq = req as AuthenticatedRequest;
+      const gameId = routeParam(req.params.gameId);
+      const worldId = routeParam(req.params.worldId);
+      const body = req.body as CreateRestorePointRequest;
+      const world = await worldPresetsRepository.get(worldPk(gameId, worldId));
+      if (!world || !isGameWorldForGame(world, gameId)) {
+        res.status(404).json({ error: "world not found" });
+        return;
+      }
+      if (gameId.toLowerCase() !== "7d2d") {
+        res.status(400).json({ error: "managed restore points are currently supported for 7D2D" });
+        return;
+      }
+
+      const now = new Date().toISOString();
+      const restorePointId = randomUUID();
+      const location = await resolveWorldConfigLocation(gameId, world);
+      const snapshotPrefix = `${restorePointRoot(location.worldPrefix, restorePointId)}/snapshot`;
+      const copied = await copyLiveWorldData(
+        location.bucket,
+        location.worldPrefix,
+        snapshotPrefix,
+      );
+      if (copied.stateObjectCount === 0) {
+        await deleteS3Prefix(location.bucket, restorePointRoot(location.worldPrefix, restorePointId));
+        res.status(409).json({ error: "the world has no uploaded save data to preserve" });
+        return;
+      }
+
+      const requestedName = typeof body?.name === "string" ? body.name.trim() : "";
+      const requestedDescription = typeof body?.description === "string"
+        ? body.description.trim()
+        : "";
+      const restorePoint: RestorePointManifest = {
+        schemaVersion: 1,
+        restorePointId,
+        name: requestedName.slice(0, 120) || `Restore point ${new Date(now).toLocaleString("en-US", { timeZone: "UTC" })} UTC`,
+        description: requestedDescription.slice(0, 500) || undefined,
+        createdAt: now,
+        createdBy: authReq.user.sub,
+        sourceWorldId: world.worldId,
+        sourceWorldName: world.name,
+        sourceWorldPrefix: location.worldPrefix,
+        objectCount: copied.objectCount,
+        sizeBytes: copied.sizeBytes,
+        sourceLatestAt: copied.latestAt,
+      };
+      await s3Client.send(new PutObjectCommand({
+        Bucket: location.bucket,
+        Key: restorePointManifestKey(location.worldPrefix, restorePointId),
+        Body: `${JSON.stringify(restorePoint, null, 2)}\n`,
+        ContentType: "application/json",
+      }));
+      res.status(201).json({ restorePoint });
+    }),
+  );
+
+  router.post(
+    "/v1/games/:gameId/worlds/:worldId/restore-points/:restorePointId/restore",
+    withAsync(async (req, res) => {
+      const authReq = req as AuthenticatedRequest;
+      const gameId = routeParam(req.params.gameId);
+      const worldId = routeParam(req.params.worldId);
+      const restorePointId = routeParam(req.params.restorePointId);
+      const body = req.body as RestoreWorldRequest;
+      const sourceWorld = await worldPresetsRepository.get(worldPk(gameId, worldId));
+      if (!sourceWorld || !isGameWorldForGame(sourceWorld, gameId)) {
+        res.status(404).json({ error: "world not found" });
+        return;
+      }
+      if (gameId.toLowerCase() !== "7d2d") {
+        res.status(400).json({ error: "managed restore points are currently supported for 7D2D" });
+        return;
+      }
+
+      const sourceLocation = await resolveWorldConfigLocation(gameId, sourceWorld);
+      const restorePoint = await getRestorePointManifest(
+        sourceLocation.bucket,
+        sourceLocation.worldPrefix,
+        restorePointId,
+      );
+      if (!restorePoint) {
+        res.status(404).json({ error: "restore point not found" });
+        return;
+      }
+
+      const now = new Date().toISOString();
+      const nextWorldId = randomUUID();
+      const targetPrefix = siblingWorldPrefix(sourceLocation.worldPrefix, gameId, nextWorldId);
+      const copied = await copyS3Prefix(
+        sourceLocation.bucket,
+        `${restorePointRoot(sourceLocation.worldPrefix, restorePointId)}/snapshot`,
+        targetPrefix,
+      );
+      const requestedName = typeof body?.name === "string" ? body.name.trim() : "";
+      const requestedDescription = typeof body?.description === "string"
+        ? body.description.trim()
+        : "";
+      const world: WorldPresetItem = {
+        ...sourceWorld,
+        pk: worldPk(gameId, nextWorldId),
+        gameId,
+        gameRefId: gameId,
+        kind: "game-world",
+        worldId: nextWorldId,
+        name: requestedName.slice(0, 120) || `${sourceWorld.name} — restored`,
+        description: requestedDescription.slice(0, 500) || `Restored from ${restorePoint.name}`,
+        worldPrefix: targetPrefix,
+        currentInstanceId: undefined,
+        currentInstanceGameId: undefined,
+        lockedAt: undefined,
+        clonedFromWorldId: sourceWorld.worldId,
+        restoredFromRestorePointId: restorePoint.restorePointId,
+        lastBackupAt: restorePoint.sourceLatestAt,
+        createdAt: now,
+        updatedAt: now,
+        createdBy: authReq.user.sub,
+      };
+      await worldPresetsRepository.put(world);
+      res.status(201).json({
+        world,
+        restorePoint,
+        copiedObjectCount: copied.objectCount,
+        copiedSizeBytes: copied.sizeBytes,
+      });
+    }),
+  );
+
+  router.delete(
+    "/v1/games/:gameId/worlds/:worldId/restore-points/:restorePointId",
+    withAsync(async (req, res) => {
+      const gameId = routeParam(req.params.gameId);
+      const worldId = routeParam(req.params.worldId);
+      const restorePointId = routeParam(req.params.restorePointId);
+      const world = await worldPresetsRepository.get(worldPk(gameId, worldId));
+      if (!world || !isGameWorldForGame(world, gameId)) {
+        res.status(404).json({ error: "world not found" });
+        return;
+      }
+      const location = await resolveWorldConfigLocation(gameId, world);
+      const restorePoint = await getRestorePointManifest(
+        location.bucket,
+        location.worldPrefix,
+        restorePointId,
+      );
+      if (!restorePoint) {
+        res.status(404).json({ error: "restore point not found" });
+        return;
+      }
+      const deletedObjectCount = await deleteS3Prefix(
+        location.bucket,
+        restorePointRoot(location.worldPrefix, restorePointId),
+      );
+      res.json({ deleted: true, deletedObjectCount });
     }),
   );
 
