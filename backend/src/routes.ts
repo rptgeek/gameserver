@@ -1790,7 +1790,11 @@ async function hydrateInstanceFromEc2(instance: InstanceItem): Promise<InstanceI
     return normalized;
   }
   const snapshot = await describeEc2InstanceSnapshot(instance.instanceId);
-  if (!snapshot) return normalizeInstanceLifecycle(instance);
+  // A freshly launched EC2 instance can briefly return InvalidInstanceID.NotFound
+  // before it has propagated to DescribeInstances. Keep the launch record intact
+  // so a later refresh can observe the real state instead of poisoning it as
+  // permanently terminated.
+  if (!snapshot || snapshot.notFound) return normalizeInstanceLifecycle(instance);
 
   const next: InstanceItem = {
     ...instance,
