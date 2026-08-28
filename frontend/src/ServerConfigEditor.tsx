@@ -61,15 +61,6 @@ const movementOptions: ConfigOption[] = [
   { value: '4', label: 'Nightmare' },
 ];
 
-const difficultyOptions: ConfigOption[] = [
-  { value: '0', label: 'Scavenger' },
-  { value: '1', label: 'Adventurer' },
-  { value: '2', label: 'Nomad' },
-  { value: '3', label: 'Warrior' },
-  { value: '4', label: 'Survivalist' },
-  { value: '5', label: 'Insane' },
-];
-
 const FIELD_DEFINITIONS: ConfigFieldDefinition[] = [
   { name: 'ServerName', label: 'Server name', tab: 'identity', section: 'Server listing', help: 'Shown in the public server browser.' },
   { name: 'ServerDescription', label: 'Description', tab: 'identity', section: 'Server listing', type: 'textarea' },
@@ -106,37 +97,15 @@ const FIELD_DEFINITIONS: ConfigFieldDefinition[] = [
   { name: 'WorldGenSize', label: 'Generated world size', tab: 'world', section: 'Random generation', type: 'select', options: ['6144', '8192', '10240'].map((value) => ({ value, label: `${value} × ${value}` })), caution: true },
   { name: 'SandboxCode', label: 'Sandbox options code', tab: 'world', section: 'Sandbox', help: 'Paste the code copied from the in-game sandbox options screen.', caution: true },
 
-  { name: 'GameDifficulty', label: 'Difficulty', tab: 'gameplay', section: 'Difficulty', type: 'select', options: difficultyOptions },
-  { name: 'DayNightLength', label: 'Day length', tab: 'gameplay', section: 'Time', type: 'number', min: 10, unit: 'minutes' },
-  { name: 'DayLightLength', label: 'Daylight hours', tab: 'gameplay', section: 'Time', type: 'number', min: 0, max: 24 },
   { name: 'DayCount', label: 'Starting day', tab: 'gameplay', section: 'Time', type: 'number', min: 1 },
-  { name: 'BloodMoonFrequency', label: 'Blood moon frequency', tab: 'gameplay', section: 'Blood moon', type: 'number', min: 0, unit: 'days' },
-  { name: 'BloodMoonRange', label: 'Frequency variance', tab: 'gameplay', section: 'Blood moon', type: 'number', min: 0, unit: 'days' },
-  { name: 'BloodMoonWarning', label: 'Warning hour', tab: 'gameplay', section: 'Blood moon', type: 'number', min: -1, max: 24 },
-  { name: 'BloodMoonEnemyCount', label: 'Enemies per player', tab: 'gameplay', section: 'Blood moon', type: 'number', min: 1, caution: true },
-  { name: 'XPMultiplier', label: 'XP multiplier', tab: 'gameplay', section: 'Progression & loot', type: 'number', min: 0, unit: '%' },
-  { name: 'LootAbundance', label: 'Loot abundance', tab: 'gameplay', section: 'Progression & loot', type: 'number', min: 0, unit: '%' },
-  { name: 'LootRespawnDays', label: 'Loot respawn', tab: 'gameplay', section: 'Progression & loot', type: 'number', min: -1, unit: 'days' },
-  { name: 'AirDropFrequency', label: 'Air drop frequency', tab: 'gameplay', section: 'Progression & loot', type: 'number', min: 0, unit: 'hours' },
-  { name: 'AirDropMarker', label: 'Air drop map marker', tab: 'gameplay', section: 'Progression & loot', type: 'boolean' },
   { name: 'PartySharedKillRange', label: 'Shared kill range', tab: 'gameplay', section: 'Multiplayer rules', type: 'number', min: 0, unit: 'meters' },
   { name: 'PlayerKillingMode', label: 'Player killing', tab: 'gameplay', section: 'Multiplayer rules', type: 'select', options: [{ value: '0', label: 'No killing' }, { value: '1', label: 'Allies only' }, { value: '2', label: 'Strangers only' }, { value: '3', label: 'Everyone' }] },
   { name: 'AllowSpawnNearFriend', label: 'Spawn near friends', tab: 'gameplay', section: 'Multiplayer rules', type: 'select', options: [{ value: '0', label: 'Disabled' }, { value: '1', label: 'Always' }, { value: '2', label: 'Forest biome only' }] },
   { name: 'CameraRestrictionMode', label: 'Camera mode', tab: 'gameplay', section: 'Player rules', type: 'select', options: [{ value: '0', label: 'First or third person' }, { value: '1', label: 'First person only' }, { value: '2', label: 'Third person only' }] },
   { name: 'BuildCreate', label: 'Cheat mode', tab: 'gameplay', section: 'Player rules', type: 'boolean' },
-  { name: 'DeathPenalty', label: 'Death penalty', tab: 'gameplay', section: 'Player rules', type: 'select', options: [{ value: '0', label: 'Nothing' }, { value: '1', label: 'XP debt' }, { value: '2', label: 'Injured' }, { value: '3', label: 'Permanent death' }] },
-  { name: 'DropOnDeath', label: 'Drop on death', tab: 'gameplay', section: 'Player rules', type: 'select', options: [{ value: '0', label: 'Nothing' }, { value: '1', label: 'Everything' }, { value: '2', label: 'Toolbelt only' }, { value: '3', label: 'Backpack only' }, { value: '4', label: 'Delete everything' }] },
-  { name: 'DropOnQuit', label: 'Drop on quit', tab: 'gameplay', section: 'Player rules', type: 'select', options: [{ value: '0', label: 'Nothing' }, { value: '1', label: 'Everything' }, { value: '2', label: 'Toolbelt only' }, { value: '3', label: 'Backpack only' }] },
 
-  { name: 'EnemySpawnMode', label: 'Enemy spawning', tab: 'population', section: 'Population', type: 'boolean' },
-  { name: 'EnemyDifficulty', label: 'Feral enemies', tab: 'population', section: 'Population', type: 'select', options: [{ value: '0', label: 'Normal' }, { value: '1', label: 'Feral' }] },
   { name: 'MaxSpawnedZombies', label: 'Maximum zombies', tab: 'population', section: 'Population', type: 'number', min: 0, caution: true, help: 'High impact on server CPU during blood moons and sleepers.' },
   { name: 'MaxSpawnedAnimals', label: 'Maximum animals', tab: 'population', section: 'Population', type: 'number', min: 0, caution: true },
-  { name: 'ZombieMove', label: 'Day movement', tab: 'population', section: 'Zombie movement', type: 'select', options: movementOptions },
-  { name: 'ZombieMoveNight', label: 'Night movement', tab: 'population', section: 'Zombie movement', type: 'select', options: movementOptions },
-  { name: 'ZombieFeralMove', label: 'Feral movement', tab: 'population', section: 'Zombie movement', type: 'select', options: movementOptions },
-  { name: 'ZombieBMMove', label: 'Blood moon movement', tab: 'population', section: 'Zombie movement', type: 'select', options: movementOptions },
-  { name: 'ZombieFeralSense', label: 'Feral sense', tab: 'population', section: 'Senses', type: 'select', options: [{ value: '0', label: 'Off' }, { value: '1', label: 'Day' }, { value: '2', label: 'Night' }, { value: '3', label: 'Always' }] },
   { name: 'PlayerSafeZoneLevel', label: 'New-player safe level', tab: 'population', section: 'New-player protection', type: 'number', min: 0 },
   { name: 'PlayerSafeZoneHours', label: 'Safe-zone duration', tab: 'population', section: 'New-player protection', type: 'number', min: 0, unit: 'world hours' },
 
