@@ -805,6 +805,50 @@ tbody tr:hover {
   animation: config-section-in 160ms ease-out both;
 }
 
+.sandbox-code-banner {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(180px, auto);
+  align-items: center;
+  gap: 1rem;
+  padding: 0.8rem 0.9rem;
+  border: 1px solid rgba(85, 230, 209, 0.24);
+  border-radius: 10px;
+  background:
+    linear-gradient(105deg, rgba(85, 230, 209, 0.1), transparent 48%),
+    rgba(7, 17, 36, 0.82);
+}
+
+.sandbox-code-banner strong,
+.sandbox-code-banner p {
+  display: block;
+  margin: 0;
+}
+
+.sandbox-code-banner strong {
+  margin-top: 0.12rem;
+  color: #ecfffb;
+  font-size: 0.86rem;
+}
+
+.sandbox-code-banner p {
+  margin-top: 0.28rem;
+  color: #9eabd0;
+  font-size: 0.72rem;
+  line-height: 1.4;
+}
+
+.sandbox-code-banner code {
+  max-width: 320px;
+  padding: 0.5rem 0.62rem;
+  overflow-x: auto;
+  border: 1px solid rgba(85, 230, 209, 0.2);
+  border-radius: 7px;
+  background: rgba(2, 8, 19, 0.86);
+  color: var(--config-cyan);
+  font-size: 0.68rem;
+  white-space: nowrap;
+}
+
 .server-config-section {
   display: grid;
   grid-template-columns: 145px minmax(0, 1fr);
@@ -1018,6 +1062,10 @@ tbody tr:hover {
   }
 
   .server-config-section {
+    grid-template-columns: 1fr;
+  }
+
+  .sandbox-code-banner {
     grid-template-columns: 1fr;
   }
 

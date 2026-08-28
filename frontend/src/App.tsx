@@ -248,6 +248,10 @@ function windroseMonitorUrl(publicIp?: string): string | undefined {
   return publicIp ? `http://${publicIp}:8080` : undefined;
 }
 
+function sevenDaysDashboardUrl(publicIp?: string): string | undefined {
+  return publicIp ? `http://${publicIp}:8080` : undefined;
+}
+
 const LAUNCH_PHASES: LaunchPhaseDefinition[] = [
   { key: 'ec2', label: 'Launching EC2 server', estimateSeconds: 75 },
   { key: 'bootstrap', label: 'Bootstrapping host', estimateSeconds: 95 },
@@ -2094,6 +2098,10 @@ export default function App() {
                       worldGameId(world).toLowerCase() === 'windrose'
                         ? windroseMonitorUrl(runtime.publicIp)
                         : undefined;
+                    const dashboardUrl =
+                      active && worldGameId(world).toLowerCase() === '7d2d'
+                        ? sevenDaysDashboardUrl(runtime.publicIp)
+                        : undefined;
                     return (
                       <article className="world-card" key={world.worldId}>
                         <div className="world-card-head">
@@ -2224,6 +2232,16 @@ export default function App() {
                               rel="noreferrer"
                             >
                               Monitor
+                            </a>
+                          )}
+                          {dashboardUrl && (
+                            <a
+                              className="btn btn-small"
+                              href={dashboardUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              Web dashboard
                             </a>
                           )}
                           <button
@@ -2500,6 +2518,16 @@ export default function App() {
                           Monitor
                         </a>
                       )}
+                      {instanceGameId(selectedInstance).toLowerCase() === '7d2d' && sevenDaysDashboardUrl(selectedInstance.publicIp) && (
+                        <a
+                          className="btn btn-small"
+                          href={sevenDaysDashboardUrl(selectedInstance.publicIp)}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          Web dashboard
+                        </a>
+                      )}
                       <button
                         className="btn btn-small btn-success"
                         disabled={isOperationRunning(selectedInstance)}
@@ -2588,7 +2616,7 @@ export default function App() {
                 {detailTab === 'console' && (
                   <div className="console-panel">
                     <p className="field-hint">
-                      Sends a command to the running 7D2D telnet console on the instance. Examples: status, listplayers, saveworld, say Server restart in 5 minutes.
+                      Sends a command to the running 7D2D telnet console on the instance. Use createwebuser to begin native-dashboard account enrollment.
                     </p>
                     <div className="console-command-row">
                       <input
@@ -2616,6 +2644,7 @@ export default function App() {
                       <button className="btn btn-small" onClick={() => setServerCommand('status')}>status</button>
                       <button className="btn btn-small" onClick={() => setServerCommand('listplayers')}>listplayers</button>
                       <button className="btn btn-small" onClick={() => setServerCommand('saveworld')}>saveworld</button>
+                      <button className="btn btn-small" onClick={() => setServerCommand('createwebuser')}>createwebuser</button>
                     </div>
                     <p className="field-hint">
                       Command output is recorded in the operation result. Server-side effects also appear in Server Logs.

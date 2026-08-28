@@ -21,6 +21,10 @@
   <property name="ServerMaxAllowedViewDistance" value="12" />
   <property name="ServerAllowCrossplay" value="true" />
   <property name="HideCommandExecutionLog" value="0" />
+  <property name="WebDashboardEnabled" value="true" />
+  <property name="WebDashboardPort" value="8080" />
+  <property name="WebDashboardUrl" value="" />
+  <property name="EnableMapRendering" value="true" />
   <property name="TelnetEnabled" value="true" />
   <property name="TelnetPort" value="8081" />
   <property name="TelnetPassword" value="" />

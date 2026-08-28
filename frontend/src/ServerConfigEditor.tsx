@@ -1,7 +1,7 @@
 import React, { useId, useMemo, useState } from 'react';
 
 type ConfigFieldType = 'text' | 'password' | 'number' | 'boolean' | 'select' | 'textarea';
-type ConfigTabId = 'identity' | 'network' | 'world' | 'gameplay' | 'population' | 'claims' | 'system' | 'other' | 'raw';
+type ConfigTabId = 'identity' | 'network' | 'world' | 'sandbox' | 'gameplay' | 'population' | 'claims' | 'system' | 'other' | 'raw';
 
 interface ConfigOption {
   value: string;
@@ -26,6 +26,13 @@ interface ConfigFieldDefinition {
 interface ParsedProperty {
   name: string;
   value: string;
+}
+
+interface SandboxFieldDefinition extends ConfigFieldDefinition {
+  tab: 'sandbox';
+  enumId: number;
+  defaultValue: string;
+  options: ConfigOption[];
 }
 
 interface ServerConfigEditorProps {
@@ -82,9 +89,9 @@ const FIELD_DEFINITIONS: ConfigFieldDefinition[] = [
   { name: 'ServerDisabledNetworkProtocols', label: 'Disabled protocols', tab: 'network', section: 'Connectivity', help: 'Comma-separated: LiteNetLib, SteamNetworking.' },
   { name: 'ServerMaxWorldTransferSpeedKiBs', label: 'World transfer limit', tab: 'network', section: 'Connectivity', type: 'number', min: 1, max: 1300, unit: 'KiB/s' },
   { name: 'ServerAllowCrossplay', label: 'Crossplay', tab: 'network', section: 'Connectivity', type: 'boolean' },
-  { name: 'WebDashboardEnabled', label: 'Web dashboard', tab: 'network', section: 'Administration', type: 'boolean' },
-  { name: 'WebDashboardPort', label: 'Dashboard port', tab: 'network', section: 'Administration', type: 'number', min: 1, max: 65535, caution: true },
-  { name: 'WebDashboardUrl', label: 'External dashboard URL', tab: 'network', section: 'Administration' },
+  { name: 'WebDashboardEnabled', label: 'Native web dashboard', tab: 'network', section: 'Administration', type: 'boolean', caution: true, help: 'Served by 7D2D on the instance public IP. Create web users through the game console and grant only the permissions they need.' },
+  { name: 'WebDashboardPort', label: 'Dashboard port', tab: 'network', section: 'Administration', type: 'number', min: 1, max: 65535, caution: true, help: 'Port 8080 is opened by the managed 7D2D launch profile.' },
+  { name: 'WebDashboardUrl', label: 'External dashboard URL', tab: 'network', section: 'Administration', help: 'Leave blank for direct public-IP access. Set the full HTTPS URL only when a reverse proxy is configured.' },
   { name: 'EnableMapRendering', label: 'Dashboard map rendering', tab: 'network', section: 'Administration', type: 'boolean', caution: true, help: 'Uses additional CPU and disk while players explore.' },
   { name: 'TelnetEnabled', label: 'Telnet console', tab: 'network', section: 'Telnet', type: 'boolean' },
   { name: 'TelnetPort', label: 'Telnet port', tab: 'network', section: 'Telnet', type: 'number', min: 1, max: 65535, caution: true },
@@ -163,12 +170,71 @@ const FIELD_DEFINITIONS: ConfigFieldDefinition[] = [
   { name: 'TwitchBloodMoonAllowed', label: 'Twitch during blood moons', tab: 'system', section: 'Integrations', type: 'boolean', caution: true },
 ];
 
+function sandboxOptions(
+  values: Array<string | number | boolean>,
+  label: (value: string) => string = (value) => value,
+): ConfigOption[] {
+  return values.map((value) => {
+    const normalized = String(value);
+    return { value: normalized, label: label(normalized) };
+  });
+}
+
+const multiplierValues = [0, 0.25, 0.35, 0.5, 0.65, 0.75, 0.85, 1, 1.25, 1.5, 2, 3, 4, 5];
+const damageValues = [0, 0.25, 0.35, 0.5, 0.65, 0.75, 0.85, 1, 1.25, 1.5, 2, 2.5, 3];
+const percentLabel = (value: string) => Number(value) === 0 ? 'None' : `${Math.round(Number(value) * 100)}%`;
+const dayLabel = (value: string) => Number(value) === 0 ? 'Disabled' : `${value} day${value === '1' ? '' : 's'}`;
+
+const SANDBOX_FIELDS: SandboxFieldDefinition[] = [
+  { name: 'XPMultiplier', label: 'XP multiplier', tab: 'sandbox', section: 'Progression', type: 'select', enumId: 18, defaultValue: '1', options: sandboxOptions([0, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 3, 5], percentLabel) },
+  { name: 'QuestProgressionDailyLimit', label: 'Tier-progressing quests per day', tab: 'sandbox', section: 'Progression', type: 'select', enumId: 123, defaultValue: '4', options: sandboxOptions([-1, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10], (value) => value === '-1' ? 'Unlimited' : value), help: 'Additional quests still award normal rewards but do not advance the trader tier that day.' },
+  { name: 'QuestsPerTier', label: 'Quests required per tier', tab: 'sandbox', section: 'Progression', type: 'select', enumId: 122, defaultValue: '10', options: sandboxOptions([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]) },
+  { name: 'StarterSkillPoints', label: 'Starting skill points', tab: 'sandbox', section: 'Progression', type: 'select', enumId: 121, defaultValue: '4', options: sandboxOptions([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]) },
+  { name: 'QuestsEnabled', label: 'Trader quests', tab: 'sandbox', section: 'Progression', type: 'boolean', enumId: 118, defaultValue: 'true', options: sandboxOptions([false, true]) },
+  { name: 'BiomeProgression', label: 'Biome progression', tab: 'sandbox', section: 'Progression', type: 'boolean', enumId: 55, defaultValue: 'true', options: sandboxOptions([false, true]) },
+
+  { name: 'BloodMoonFrequency', label: 'Blood moon frequency', tab: 'sandbox', section: 'Blood moon', type: 'select', enumId: 48, defaultValue: '7', options: sandboxOptions([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 14, 20, 30], dayLabel) },
+  { name: 'BloodMoonRange', label: 'Frequency variance', tab: 'sandbox', section: 'Blood moon', type: 'select', enumId: 49, defaultValue: '0', options: sandboxOptions([0, 1, 2, 3, 4, 7, 10, 14, 20], (value) => `${value} day${value === '1' ? '' : 's'}`) },
+  { name: 'BloodMoonWarning', label: 'Warning begins', tab: 'sandbox', section: 'Blood moon', type: 'select', enumId: 50, defaultValue: '1', options: sandboxOptions([0, 1, 2], (value) => ({ '0': 'Disabled', '1': 'Morning', '2': 'Evening' })[value] ?? value) },
+  { name: 'BloodMoonEnemyCount', label: 'Simultaneous enemies per player', tab: 'sandbox', section: 'Blood moon', type: 'select', enumId: 51, defaultValue: '8', options: sandboxOptions([4, 6, 8, 10, 12, 16, 24, 32, 64], (value) => `${value} enemies`), caution: true, help: 'MaxSpawnedZombies can cap the combined multiplayer total.' },
+  { name: 'BlockDamageAIBM', label: 'Blood moon block damage', tab: 'sandbox', section: 'Blood moon', type: 'select', enumId: 33, defaultValue: '1', options: sandboxOptions(damageValues, percentLabel), caution: true },
+
+  { name: 'AirDropFrequency', label: 'Air drop frequency', tab: 'sandbox', section: 'Events & weather', type: 'select', enumId: 52, defaultValue: '3', options: sandboxOptions([0, 1, 2, 3, 4, 5, 6], dayLabel) },
+  { name: 'AirDropMarker', label: 'Air drop map marker', tab: 'sandbox', section: 'Events & weather', type: 'boolean', enumId: 53, defaultValue: 'true', options: sandboxOptions([false, true]) },
+  { name: 'AirDropRandomTime', label: 'Air drop delivery window', tab: 'sandbox', section: 'Events & weather', type: 'select', enumId: 54, defaultValue: '0', options: sandboxOptions([0, 1, 2, 3, 4, 5, 6], (value) => ({ '0': 'No variance', '1': 'Morning', '2': 'Midday', '3': 'Evening', '4': 'Night', '5': 'All day', '6': 'Any time' })[value] ?? value) },
+  { name: 'StormFreq', label: 'Storm frequency', tab: 'sandbox', section: 'Events & weather', type: 'select', enumId: 57, defaultValue: '1', options: sandboxOptions([0, 0.5, 1, 1.5, 2, 3, 4, 5], percentLabel) },
+  { name: 'StormWarning', label: 'Storm warnings', tab: 'sandbox', section: 'Events & weather', type: 'boolean', enumId: 58, defaultValue: 'true', options: sandboxOptions([false, true]) },
+
+  { name: 'DayNightLength', label: '24-hour cycle length', tab: 'sandbox', section: 'World time', type: 'select', enumId: 66, defaultValue: '60', options: sandboxOptions([10, 20, 30, 40, 50, 60, 90, 120], (value) => `${value} minutes`) },
+  { name: 'DayLightLength', label: 'Daylight hours', tab: 'sandbox', section: 'World time', type: 'select', enumId: 67, defaultValue: '18', options: sandboxOptions([0, 4, 6, 8, 10, 12, 14, 16, 18, 20, 24], (value) => `${value} hours`) },
+  { name: 'TemperatureSurvival', label: 'Temperature survival', tab: 'sandbox', section: 'World time', type: 'boolean', enumId: 56, defaultValue: 'true', options: sandboxOptions([false, true]) },
+
+  { name: 'EnemySpawnMode', label: 'Enemy spawning', tab: 'sandbox', section: 'Enemies', type: 'boolean', enumId: 30, defaultValue: 'true', options: sandboxOptions([false, true]) },
+  { name: 'ZombieMove', label: 'Zombie day speed', tab: 'sandbox', section: 'Enemies', type: 'select', enumId: 34, defaultValue: '0', options: movementOptions },
+  { name: 'ZombieMoveNight', label: 'Zombie night speed', tab: 'sandbox', section: 'Enemies', type: 'select', enumId: 35, defaultValue: '3', options: movementOptions },
+  { name: 'ZombieFeralMove', label: 'Feral zombie speed', tab: 'sandbox', section: 'Enemies', type: 'select', enumId: 36, defaultValue: '3', options: movementOptions },
+  { name: 'ZombieBMMove', label: 'Blood moon zombie speed', tab: 'sandbox', section: 'Enemies', type: 'select', enumId: 37, defaultValue: '3', options: movementOptions },
+  { name: 'BlockDamageAI', label: 'Enemy block damage', tab: 'sandbox', section: 'Enemies', type: 'select', enumId: 32, defaultValue: '1', options: sandboxOptions(damageValues, percentLabel) },
+  { name: 'ZombieRageChance', label: 'Zombie rage chance', tab: 'sandbox', section: 'Enemies', type: 'select', enumId: 41, defaultValue: '0.15', options: sandboxOptions([0, 0.15, 0.3, 0.35, 0.4, 0.5, 0.6, 0.75, 0.9, 1], percentLabel) },
+
+  { name: 'GlobalLootCount', label: 'Global loot abundance', tab: 'sandbox', section: 'Loot & resources', type: 'select', enumId: 78, defaultValue: '1', options: sandboxOptions(multiplierValues, percentLabel) },
+  { name: 'LootRespawnDays', label: 'Loot respawn', tab: 'sandbox', section: 'Loot & resources', type: 'select', enumId: 75, defaultValue: '7', options: sandboxOptions([-1, 5, 7, 10, 15, 20, 30, 40, 50], (value) => value === '-1' ? 'Disabled' : `${value} days`) },
+  { name: 'MiningOutput', label: 'Mining output', tab: 'sandbox', section: 'Loot & resources', type: 'select', enumId: 101, defaultValue: '1', options: sandboxOptions(multiplierValues, percentLabel) },
+  { name: 'HarvestingOutput', label: 'Harvesting output', tab: 'sandbox', section: 'Loot & resources', type: 'select', enumId: 102, defaultValue: '1', options: sandboxOptions(multiplierValues, percentLabel) },
+  { name: 'CraftingTime', label: 'Crafting time', tab: 'sandbox', section: 'Loot & resources', type: 'select', enumId: 97, defaultValue: '1', options: sandboxOptions([0, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3], percentLabel) },
+
+  { name: 'BlockDamage', label: 'Player block damage', tab: 'sandbox', section: 'Player consequences', type: 'select', enumId: 2, defaultValue: '1', options: sandboxOptions(damageValues, percentLabel) },
+  { name: 'DeathPenalty', label: 'Death penalty', tab: 'sandbox', section: 'Player consequences', type: 'select', enumId: 26, defaultValue: '1', options: [{ value: '0', label: 'Nothing' }, { value: '1', label: 'XP debt' }, { value: '2', label: 'Injured' }, { value: '3', label: 'Permanent death' }] },
+  { name: 'DropOnDeath', label: 'Drop on death', tab: 'sandbox', section: 'Player consequences', type: 'select', enumId: 27, defaultValue: '1', options: [{ value: '0', label: 'Nothing' }, { value: '1', label: 'Everything' }, { value: '2', label: 'Toolbelt only' }, { value: '3', label: 'Backpack only' }, { value: '4', label: 'Delete everything' }] },
+];
+
 const fieldByName = new Map(FIELD_DEFINITIONS.map((field) => [field.name, field]));
 
 const TAB_DEFINITIONS: Array<{ id: ConfigTabId; label: string; shortLabel: string }> = [
   { id: 'identity', label: 'Identity & access', shortLabel: 'Identity' },
   { id: 'network', label: 'Network & admin', shortLabel: 'Network' },
   { id: 'world', label: 'World & save', shortLabel: 'World' },
+  { id: 'sandbox', label: 'Sandbox 3.0', shortLabel: 'Sandbox' },
   { id: 'gameplay', label: 'Gameplay rules', shortLabel: 'Gameplay' },
   { id: 'population', label: 'Enemies & spawning', shortLabel: 'Population' },
   { id: 'claims', label: 'Claims & building', shortLabel: 'Claims' },
@@ -199,7 +265,10 @@ function parseProperties(xml: string): { properties: ParsedProperty[]; error?: s
 }
 
 export function serverConfigXmlValidationError(xml: string): string | undefined {
-  return parseProperties(xml).error;
+  const parsed = parseProperties(xml);
+  if (parsed.error) return parsed.error;
+  const sandboxCode = parsed.properties.find((property) => property.name === 'SandboxCode')?.value;
+  return sandboxCode === undefined ? undefined : parseSandboxCode(sandboxCode).error;
 }
 
 function escapeAttribute(value: string, quote: string): string {
@@ -235,6 +304,56 @@ function updatePropertyValue(xml: string, propertyName: string, nextValue: strin
     return `${xml.slice(0, matchIndex)}${updatedTag}${xml.slice(matchIndex + tag.length)}`;
   }
   return xml;
+}
+
+interface ParsedSandboxCode {
+  header: string;
+  values: Map<number, number>;
+  error?: string;
+}
+
+function parseSandboxCode(rawCode: string): ParsedSandboxCode {
+  const code = rawCode.trim().toUpperCase();
+  if (!code) return { header: 'A', values: new Map() };
+  if (!/^[A-Z]+$/.test(code) || (code.length - 1) % 3 !== 0) {
+    return { header: code[0] || 'A', values: new Map(), error: 'SandboxCode must contain a one-letter header followed by three-letter option blocks.' };
+  }
+  const values = new Map<number, number>();
+  for (let offset = 1; offset < code.length; offset += 3) {
+    const enumId = (code.charCodeAt(offset) - 65) * 26 + (code.charCodeAt(offset + 1) - 65);
+    const valueIndex = code.charCodeAt(offset + 2) - 65;
+    values.set(enumId, valueIndex);
+  }
+  return { header: code[0], values };
+}
+
+function sandboxValue(parsed: ParsedSandboxCode, definition: SandboxFieldDefinition): string {
+  const valueIndex = parsed.values.get(definition.enumId);
+  return valueIndex === undefined
+    ? definition.defaultValue
+    : definition.options[valueIndex]?.value ?? definition.defaultValue;
+}
+
+function updateSandboxCode(
+  rawCode: string,
+  definition: SandboxFieldDefinition,
+  nextValue: string,
+): string {
+  const parsed = parseSandboxCode(rawCode);
+  if (parsed.error) return rawCode;
+  const nextIndex = definition.options.findIndex((option) => option.value === nextValue);
+  if (nextIndex < 0) return rawCode;
+  if (nextValue === definition.defaultValue) parsed.values.delete(definition.enumId);
+  else parsed.values.set(definition.enumId, nextIndex);
+  const blocks = Array.from(parsed.values.entries())
+    .sort(([left], [right]) => left - right)
+    .map(([enumId, valueIndex]) => {
+      const high = String.fromCharCode(65 + Math.floor(enumId / 26));
+      const low = String.fromCharCode(65 + (enumId % 26));
+      const value = String.fromCharCode(65 + valueIndex);
+      return `${high}${low}${value}`;
+    });
+  return `${parsed.header}${blocks.join('')}`;
 }
 
 function inferredField(property: ParsedProperty): ConfigFieldDefinition {
@@ -322,6 +441,9 @@ export default function ServerConfigEditor({ xml, onChange, disabled = false, co
     () => new Map(parsed.properties.map((property) => [property.name, property])),
     [parsed.properties],
   );
+  const sandboxCode = propertyByName.get('SandboxCode')?.value;
+  const parsedSandbox = useMemo(() => parseSandboxCode(sandboxCode ?? ''), [sandboxCode]);
+  const hasSandboxCode = sandboxCode !== undefined;
   const unknownProperties = useMemo(
     () => parsed.properties.filter((property) => !fieldByName.has(property.name)),
     [parsed.properties],
@@ -329,8 +451,9 @@ export default function ServerConfigEditor({ xml, onChange, disabled = false, co
   const availableTabs = useMemo(() => TAB_DEFINITIONS.filter((tab) => {
     if (tab.id === 'raw') return true;
     if (tab.id === 'other') return unknownProperties.length > 0;
+    if (tab.id === 'sandbox') return hasSandboxCode;
     return FIELD_DEFINITIONS.some((field) => field.tab === tab.id && propertyByName.has(field.name));
-  }), [propertyByName, unknownProperties.length]);
+  }), [hasSandboxCode, propertyByName, unknownProperties.length]);
   const activeTab = availableTabs.some((tab) => tab.id === requestedTab) ? requestedTab : (availableTabs[0]?.id ?? 'raw');
   const normalizedSearch = search.trim().toLowerCase();
 
@@ -338,15 +461,17 @@ export default function ServerConfigEditor({ xml, onChange, disabled = false, co
     const presentDefinitions = FIELD_DEFINITIONS.filter((field) => propertyByName.has(field.name));
     const inferred = unknownProperties.map(inferredField);
     const candidates = normalizedSearch
-      ? [...presentDefinitions, ...inferred]
+      ? [...presentDefinitions, ...(hasSandboxCode ? SANDBOX_FIELDS : []), ...inferred]
       : activeTab === 'other'
         ? inferred
-        : presentDefinitions.filter((field) => field.tab === activeTab);
+        : activeTab === 'sandbox'
+          ? SANDBOX_FIELDS
+          : presentDefinitions.filter((field) => field.tab === activeTab);
     if (!normalizedSearch) return candidates;
     return candidates.filter((field) =>
       `${field.label} ${field.name} ${field.help ?? ''}`.toLowerCase().includes(normalizedSearch),
     );
-  }, [activeTab, normalizedSearch, propertyByName, unknownProperties]);
+  }, [activeTab, hasSandboxCode, normalizedSearch, propertyByName, unknownProperties]);
 
   const sections = useMemo(() => {
     const grouped = new Map<string, ConfigFieldDefinition[]>();
@@ -406,6 +531,7 @@ export default function ServerConfigEditor({ xml, onChange, disabled = false, co
       </nav>
 
       {parsed.error ? <div className="server-config-parse-error"><strong>XML needs attention</strong><span>{parsed.error}</span></div> : null}
+      {hasSandboxCode && parsedSandbox.error ? <div className="server-config-parse-error"><strong>Sandbox code needs attention</strong><span>{parsedSandbox.error}</span></div> : null}
 
       {activeTab === 'raw' && !normalizedSearch ? (
         <section className="server-config-raw">
@@ -426,6 +552,16 @@ export default function ServerConfigEditor({ xml, onChange, disabled = false, co
       ) : (
         <div className="server-config-sections">
           {normalizedSearch ? <div className="server-config-search-result">Showing matches across every tab</div> : null}
+          {!normalizedSearch && activeTab === 'sandbox' ? (
+            <div className="sandbox-code-banner">
+              <div>
+                <span className="eyebrow">Current 3.0 format</span>
+                <strong>Changes are encoded directly into SandboxCode</strong>
+                <p>Default choices are omitted automatically, while settings outside this curated view remain untouched.</p>
+              </div>
+              <code>{sandboxCode || 'A'}</code>
+            </div>
+          ) : null}
           {sections.map(([section, fields]) => (
             <section className="server-config-section" key={section}>
               <div className="server-config-section-title">
@@ -437,11 +573,20 @@ export default function ServerConfigEditor({ xml, onChange, disabled = false, co
                   <ConfigField
                     key={definition.name}
                     definition={definition}
-                    value={propertyByName.get(definition.name)?.value ?? ''}
-                    disabled={disabled}
+                    value={'enumId' in definition
+                      ? sandboxValue(parsedSandbox, definition as SandboxFieldDefinition)
+                      : propertyByName.get(definition.name)?.value ?? ''}
+                    disabled={disabled || ('enumId' in definition && Boolean(parsedSandbox.error))}
                     revealSecrets={revealSecrets}
                     idPrefix={idPrefix}
-                    onChange={(value) => onChange(updatePropertyValue(xml, definition.name, value))}
+                    onChange={(value) => {
+                      if ('enumId' in definition) {
+                        const nextCode = updateSandboxCode(sandboxCode ?? 'A', definition as SandboxFieldDefinition, value);
+                        onChange(updatePropertyValue(xml, 'SandboxCode', nextCode));
+                      } else {
+                        onChange(updatePropertyValue(xml, definition.name, value));
+                      }
+                    }}
                   />
                 ))}
               </div>
