@@ -1,4 +1,4 @@
-import { useId, useMemo, useState } from 'react';
+import React, { useId, useMemo, useState } from 'react';
 
 type ConfigFieldType = 'text' | 'password' | 'number' | 'boolean' | 'select' | 'textarea';
 type ConfigTabId = 'identity' | 'network' | 'world' | 'gameplay' | 'population' | 'claims' | 'system' | 'other' | 'raw';
