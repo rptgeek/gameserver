@@ -1,5 +1,6 @@
 import React from 'react';
 import { useEffect, useMemo, useRef, useState } from 'react';
+import ServerConfigEditor, { serverConfigXmlValidationError } from './ServerConfigEditor';
 import {
   getCurrentUserProfile,
   initializeAuth,
@@ -770,6 +771,10 @@ export default function App() {
   const [serverConfigKey, setServerConfigKey] = useState('');
   const [serverConfigLoading, setServerConfigLoading] = useState(false);
   const [serverConfigSaving, setServerConfigSaving] = useState(false);
+  const serverConfigValidationError = useMemo(
+    () => serverConfigXmlValidationError(serverConfigXml),
+    [serverConfigXml],
+  );
   const [runtimeServerJson, setRuntimeServerJson] = useState('{}');
   const [runtimeWorldJson, setRuntimeWorldJson] = useState('{}');
   const [runtimeServerKey, setRuntimeServerKey] = useState('');
@@ -1354,6 +1359,11 @@ export default function App() {
     try {
       const gameId = instanceGameId(selectedInstance);
       if (gameId && selectedInstance.selectedWorldId && supportsServerConfig(gameId)) {
+        if (serverConfigValidationError) {
+          setConfigError(serverConfigValidationError);
+          notify('error', 'Fix the serverconfig.xml validation error before saving.');
+          return;
+        }
         setServerConfigSaving(true);
         setConfigError('');
         const saved = await saveWorldServerConfig(gameId, selectedInstance.selectedWorldId, serverConfigXml);
@@ -1463,6 +1473,8 @@ export default function App() {
       return;
     }
     setServerConfigLoading(true);
+    setServerConfigXml('');
+    setConfigError('');
     try {
       const config = await getWorldServerConfig(gameId, worldId);
       setServerConfigXml(config.configXml || '');
@@ -1474,6 +1486,11 @@ export default function App() {
     } finally {
       setServerConfigLoading(false);
     }
+  };
+
+  const handleServerConfigXmlChange = (nextXml: string) => {
+    setServerConfigXml(nextXml);
+    setConfigError('');
   };
 
   const handleConfigureWorldLaunch = async (world: WorldPreset) => {
@@ -1526,6 +1543,11 @@ export default function App() {
     setInstanceCreating(true);
     try {
       if (addForm.selectedWorldId && supportsServerConfig(addForm.gameId)) {
+        if (serverConfigValidationError) {
+          setConfigError(serverConfigValidationError);
+          notify('error', 'Fix the server configuration before launching.');
+          return;
+        }
         setServerConfigSaving(true);
         await saveWorldServerConfig(addForm.gameId, addForm.selectedWorldId, serverConfigXml);
       }
@@ -2618,12 +2640,13 @@ export default function App() {
                           Restart 7D2D after saving to apply changes.
                         </p>
                         {serverConfigKey && <small className="field-hint">S3: {serverConfigKey}</small>}
-                        <textarea
-                          value={serverConfigLoading ? 'Loading serverconfig.xml…' : serverConfigXml}
-                          onChange={(event) => setServerConfigXml(event.target.value)}
-                          className="xml-editor"
+                        <ServerConfigEditor
+                          xml={serverConfigXml}
+                          onChange={handleServerConfigXmlChange}
                           disabled={serverConfigLoading}
-                          spellCheck={false}
+                          contextLabel={serverConfigLoading
+                            ? 'Loading serverconfig.xml…'
+                            : `World: ${selectedInstance.worldName || selectedInstance.selectedWorldId}`}
                         />
                       </>
                     ) : instanceGameId(selectedInstance) && selectedInstance.selectedWorldId && supportsRuntimeJsonConfig(instanceGameId(selectedInstance)) ? (
@@ -2678,7 +2701,11 @@ export default function App() {
                       {configError && <div className="error">{configError}</div>}
                       <button
                         className="btn btn-success"
-                        disabled={configSaving || serverConfigSaving || serverConfigLoading}
+                        disabled={configSaving || serverConfigSaving || serverConfigLoading || Boolean(
+                          instanceGameId(selectedInstance) && supportsServerConfig(instanceGameId(selectedInstance))
+                            ? serverConfigValidationError
+                            : undefined,
+                        )}
                         onClick={handleSaveConfig}
                       >
                         {instanceGameId(selectedInstance) && selectedInstance.selectedWorldId && supportsServerConfig(instanceGameId(selectedInstance))
@@ -2807,7 +2834,7 @@ export default function App() {
 
       {showAddInstance && (
         <div className="modal-backdrop" role="dialog" aria-modal="true">
-          <div className="modal">
+          <div className="modal launch-modal">
             <h3>Configure launch</h3>
             <label>
               Game
@@ -2957,18 +2984,17 @@ export default function App() {
               </button>
             </div>
             {supportsServerConfig(addForm.gameId) && (
-              <label>
-                serverconfig.xml
+              <div>
                 {serverConfigKey && <small className="field-hint">S3: {serverConfigKey}</small>}
-                <textarea
-                  rows={18}
-                  value={serverConfigLoading ? 'Loading serverconfig.xml…' : serverConfigXml}
-                  onChange={(event) => setServerConfigXml(event.target.value)}
+                <ServerConfigEditor
+                  xml={serverConfigXml}
+                  onChange={handleServerConfigXmlChange}
                   disabled={serverConfigLoading}
-                  spellCheck={false}
-                  className="xml-editor"
+                  contextLabel={serverConfigLoading
+                    ? 'Loading serverconfig.xml…'
+                    : `Launch settings for ${addForm.worldName || 'selected world'}`}
                 />
-              </label>
+              </div>
             )}
             <div className="modal-actions">
               <button type="button" className="btn btn-small" onClick={() => setShowAddInstance(false)}>
@@ -2978,7 +3004,9 @@ export default function App() {
                 type="button"
                 className="btn btn-success"
                 onClick={handleCreateInstance}
-                disabled={serverConfigLoading || serverConfigSaving || instanceCreating}
+                disabled={serverConfigLoading || serverConfigSaving || instanceCreating || Boolean(
+                  supportsServerConfig(addForm.gameId) ? serverConfigValidationError : undefined,
+                )}
               >
                 {serverConfigSaving
                   ? 'Saving config...'

@@ -649,6 +649,387 @@ tbody tr:hover {
   gap: 0.65rem;
 }
 
+.server-config-editor {
+  --config-amber: #ffc35c;
+  --config-cyan: #55e6d1;
+  display: grid;
+  gap: 0.85rem;
+  min-width: 0;
+  padding: 1rem;
+  border: 1px solid rgba(255, 195, 92, 0.25);
+  border-radius: 14px;
+  background:
+    linear-gradient(115deg, rgba(255, 195, 92, 0.055), transparent 30%),
+    rgba(4, 10, 25, 0.72);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035);
+}
+
+.server-config-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.server-config-header h3,
+.server-config-header p,
+.server-config-section h4,
+.server-config-raw h4,
+.server-config-raw p {
+  margin: 0;
+}
+
+.server-config-header h3 {
+  font-size: clamp(1.25rem, 2vw, 1.75rem);
+  letter-spacing: -0.025em;
+}
+
+.server-config-header p,
+.server-config-raw p {
+  margin-top: 0.28rem;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.server-config-stats {
+  display: grid;
+  min-width: 104px;
+  padding: 0.55rem 0.7rem;
+  border-left: 2px solid var(--config-amber);
+  background: rgba(255, 195, 92, 0.06);
+}
+
+.server-config-stats strong {
+  color: #fff4d6;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 1.25rem;
+}
+
+.server-config-stats span,
+.server-config-stats small {
+  color: var(--muted);
+  font-size: 0.68rem;
+}
+
+.server-config-tools {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+}
+
+.server-config-search {
+  position: relative;
+  flex: 1;
+}
+
+.server-config-search::before {
+  content: '';
+  position: absolute;
+  left: 0.8rem;
+  top: 50%;
+  width: 8px;
+  height: 8px;
+  border: 1.5px solid #8fa4d8;
+  border-radius: 50%;
+  transform: translateY(-65%);
+  pointer-events: none;
+}
+
+.server-config-search::after {
+  content: '';
+  position: absolute;
+  left: 1.32rem;
+  top: 54%;
+  width: 6px;
+  height: 1.5px;
+  background: #8fa4d8;
+  transform: rotate(45deg);
+  pointer-events: none;
+}
+
+.server-config-search input {
+  width: 100%;
+  padding: 0.62rem 0.75rem 0.62rem 2.05rem;
+  border-radius: 10px;
+}
+
+.server-config-tabs {
+  display: flex;
+  gap: 0.35rem;
+  overflow-x: auto;
+  padding: 0 0 0.4rem;
+  scrollbar-width: thin;
+}
+
+.server-config-tabs button {
+  display: grid;
+  grid-template-columns: auto auto;
+  align-items: center;
+  gap: 0.38rem;
+  flex: 0 0 auto;
+  padding: 0.48rem 0.68rem;
+  border: 1px solid rgba(139, 160, 221, 0.22);
+  border-radius: 8px;
+  background: rgba(10, 18, 43, 0.8);
+  color: #b8c5e9;
+  cursor: pointer;
+  font-size: 0.78rem;
+}
+
+.server-config-tabs button span {
+  color: #6477a9;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.62rem;
+}
+
+.server-config-tabs button:hover,
+.server-config-tabs button:focus-visible {
+  border-color: rgba(85, 230, 209, 0.5);
+  color: #fff;
+}
+
+.server-config-tabs button.active {
+  border-color: rgba(255, 195, 92, 0.68);
+  color: #fff6df;
+  background: linear-gradient(135deg, rgba(255, 195, 92, 0.2), rgba(255, 195, 92, 0.06));
+  box-shadow: 0 6px 18px rgba(2, 7, 20, 0.3);
+}
+
+.server-config-tabs button.active span {
+  color: var(--config-amber);
+}
+
+.server-config-sections {
+  display: grid;
+  gap: 0.85rem;
+  animation: config-section-in 160ms ease-out both;
+}
+
+.server-config-section {
+  display: grid;
+  grid-template-columns: 145px minmax(0, 1fr);
+  gap: 0.85rem;
+  padding-top: 0.85rem;
+  border-top: 1px solid rgba(128, 150, 210, 0.15);
+}
+
+.server-config-section-title {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.server-config-section-title h4 {
+  color: #e4eaff;
+  font-size: 0.79rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.server-config-section-title span {
+  color: #6477a9;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.68rem;
+}
+
+.server-config-field-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.65rem;
+}
+
+.server-config-field {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  min-width: 0;
+  padding: 0.7rem;
+  border: 1px solid rgba(126, 147, 207, 0.17);
+  border-radius: 10px;
+  background: rgba(14, 23, 49, 0.64);
+  transition: border-color 140ms ease, background 140ms ease, transform 140ms ease;
+}
+
+.server-config-field:hover,
+.server-config-field:focus-within {
+  border-color: rgba(85, 230, 209, 0.38);
+  background: rgba(17, 29, 57, 0.82);
+}
+
+.server-config-field.caution::after {
+  content: '';
+  position: absolute;
+  top: 0.55rem;
+  right: 0.55rem;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--config-amber);
+  box-shadow: 0 0 0 3px rgba(255, 195, 92, 0.1);
+}
+
+.server-config-field-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding-right: 0.7rem;
+  color: #eef2ff;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.server-config-field-head small {
+  color: #8494bf;
+  font-size: 0.64rem;
+  font-weight: 500;
+}
+
+.server-config-field input,
+.server-config-field select,
+.server-config-field textarea {
+  width: 100%;
+  min-width: 0;
+  border-radius: 7px;
+  background: rgba(3, 8, 22, 0.82);
+}
+
+.server-config-field textarea,
+.modal .server-config-field textarea {
+  min-height: 84px;
+  resize: vertical;
+}
+
+.server-config-property-name {
+  color: #7181ad;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.62rem;
+  overflow-wrap: anywhere;
+}
+
+.server-config-help {
+  color: #9eabd0;
+  font-size: 0.7rem;
+  font-weight: 400;
+  line-height: 1.4;
+}
+
+.config-switch {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  width: max-content;
+  padding: 0.3rem 0.45rem 0.3rem 0.3rem;
+  border: 1px solid rgba(128, 150, 210, 0.24);
+  border-radius: 999px;
+  background: rgba(3, 8, 22, 0.82);
+  color: #9daacc;
+  cursor: pointer;
+  font-size: 0.72rem;
+}
+
+.config-switch-track {
+  display: flex;
+  align-items: center;
+  width: 30px;
+  height: 17px;
+  padding: 2px;
+  border-radius: 999px;
+  background: #3d496b;
+  transition: background 140ms ease;
+}
+
+.config-switch-track span {
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: #dfe5f8;
+  transition: transform 140ms ease;
+}
+
+.config-switch.enabled {
+  border-color: rgba(85, 230, 209, 0.38);
+  color: #a3f4e7;
+}
+
+.config-switch.enabled .config-switch-track {
+  background: #159a87;
+}
+
+.config-switch.enabled .config-switch-track span {
+  transform: translateX(13px);
+}
+
+.server-config-raw {
+  display: grid;
+  gap: 0.7rem;
+  animation: config-section-in 160ms ease-out both;
+}
+
+.server-config-raw .xml-editor {
+  min-height: 520px;
+}
+
+.server-config-search-result {
+  color: var(--config-cyan);
+  font-size: 0.75rem;
+}
+
+.server-config-empty,
+.server-config-parse-error {
+  padding: 1rem;
+  border: 1px dashed rgba(130, 151, 211, 0.25);
+  border-radius: 10px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.server-config-parse-error {
+  display: grid;
+  gap: 0.2rem;
+  border-style: solid;
+  border-color: rgba(255, 108, 136, 0.42);
+  background: rgba(105, 20, 42, 0.22);
+  color: #ffc4cf;
+  text-align: left;
+}
+
+.server-config-parse-error span {
+  font-size: 0.72rem;
+  overflow-wrap: anywhere;
+}
+
+.launch-modal {
+  width: min(1040px, 96vw);
+}
+
+@keyframes config-section-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (max-width: 780px) {
+  .server-config-header,
+  .server-config-tools {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .server-config-section {
+    grid-template-columns: 1fr;
+  }
+
+  .server-config-section-title {
+    justify-content: flex-start;
+  }
+
+  .server-config-field-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 .console-panel {
   display: grid;
   gap: 0.75rem;
