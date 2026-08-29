@@ -108,6 +108,8 @@ export interface ServerInstance {
   terminationReason?: string;
   stateTransitionReason?: string;
   terminatedAt?: string;
+  spotAlertAcknowledgedAt?: string;
+  spotAlertAcknowledgedBy?: string;
   [key: string]: unknown;
 }
 

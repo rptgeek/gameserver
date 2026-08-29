@@ -423,6 +423,14 @@ export async function getInstance(instanceId: string): Promise<ServerInstance | 
   return (payload as { instance?: ServerInstance }).instance || null;
 }
 
+export async function acknowledgeSpotAlert(instanceId: string): Promise<ServerInstance> {
+  const payload = await request<{ instance: ServerInstance }>(
+    `/v1/instances/${encodeURIComponent(instanceId)}/alerts/spot/acknowledge`,
+    { method: 'POST' },
+  );
+  return payload.instance;
+}
+
 export async function getPlayerStatus(instanceId: string): Promise<PlayerStatus> {
   return request<PlayerStatus>(`/v1/instances/${encodeURIComponent(instanceId)}/player-status`);
 }

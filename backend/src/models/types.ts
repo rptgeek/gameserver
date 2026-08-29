@@ -103,6 +103,8 @@ export interface InstanceItem {
   terminationReason?: string;
   stateTransitionReason?: string;
   terminatedAt?: string;
+  spotAlertAcknowledgedAt?: string;
+  spotAlertAcknowledgedBy?: string;
   lastBackupAt?: string;
   serverName?: string;
   worldBucket?: string;

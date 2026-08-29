@@ -3630,6 +3630,27 @@ export function createRouter(): Router {
   );
 
   router.post(
+    "/v1/instances/:instanceId/alerts/spot/acknowledge",
+    withAsync(async (req, res) => {
+      const instanceId = routeParam(req.params.instanceId);
+      const instance = await instanceRepository.get(instanceId);
+      if (!instance) {
+        res.status(404).json({ error: "instance not found" });
+        return;
+      }
+
+      const acknowledgedAt = new Date().toISOString();
+      const updated = {
+        ...instance,
+        spotAlertAcknowledgedAt: acknowledgedAt,
+        spotAlertAcknowledgedBy: (req as AuthenticatedRequest).user.sub,
+      };
+      await instanceRepository.put(updated);
+      res.json({ instance: updated });
+    }),
+  );
+
+  router.post(
     "/v1/instances",
     withAsync(async (req, res) => {
       const authReq = req as AuthenticatedRequest;

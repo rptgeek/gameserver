@@ -8,6 +8,7 @@ import {
   signOut,
 } from './auth';
 import {
+  acknowledgeSpotAlert,
   copyWorld,
   createRestorePoint,
   createInstance,
@@ -57,6 +58,7 @@ import type {
 } from './types';
 
 type DetailTab = 'overview' | 'bootstrap-logs' | 'server-logs' | 'console' | 'config';
+type WorkspaceView = 'fleet' | 'alerts';
 type WindroseJsonFocus = 'server' | 'world';
 type LaunchPhaseKey =
   | 'ec2'
@@ -214,10 +216,32 @@ function spotInterruptionNotice(
   };
 }
 
-function SpotInterruptionAlert({ notice, compact = false }: { notice: SpotInterruptionNotice; compact?: boolean }) {
+function SpotInterruptionAlert({
+  notice,
+  compact = false,
+  onAcknowledge,
+  acknowledging = false,
+}: {
+  notice: SpotInterruptionNotice;
+  compact?: boolean;
+  onAcknowledge?: () => void;
+  acknowledging?: boolean;
+}) {
   return (
     <div className={`spot-interruption-alert ${compact ? 'compact' : ''}`} role="alert">
-      <strong>{notice.state === 'reclaimed' ? 'Spot instance reclaimed' : 'Spot interruption warning'}</strong>
+      <div className="spot-interruption-alert-head">
+        <strong>{notice.state === 'reclaimed' ? 'Spot instance reclaimed' : 'Spot interruption warning'}</strong>
+        {onAcknowledge ? (
+          <button
+            type="button"
+            className="btn btn-small alert-clear-btn"
+            disabled={acknowledging}
+            onClick={onAcknowledge}
+          >
+            {acknowledging ? 'Clearing…' : 'Clear alert'}
+          </button>
+        ) : null}
+      </div>
       <span>{notice.message}</span>
       {notice.timestamp ? <time dateTime={notice.timestamp}>{prettyDate(notice.timestamp)}</time> : null}
     </div>
@@ -720,6 +744,8 @@ export default function App() {
   const [showTerminatedInstances, setShowTerminatedInstances] = useState(false);
   const [showSavedWorlds, setShowSavedWorlds] = useState(true);
   const [selectedInstance, setSelectedInstance] = useState<ServerInstance | null>(null);
+  const [workspaceView, setWorkspaceView] = useState<WorkspaceView>('fleet');
+  const [acknowledgingAlertIds, setAcknowledgingAlertIds] = useState<Set<string>>(() => new Set());
 
   const [detailTab, setDetailTab] = useState<DetailTab>('overview');
   const [operations, setOperations] = useState<Record<string, OperationResult>>({});
@@ -1022,11 +1048,11 @@ export default function App() {
     }
     void refreshPlayerStatuses();
     const timer = window.setInterval(() => {
-      void refreshInstances(selectedGameId === 'all' ? undefined : selectedGameId);
+      void refreshInstances(workspaceView === 'alerts' || selectedGameId === 'all' ? undefined : selectedGameId);
       void refreshPlayerStatuses();
     }, 5 * 60 * 1000);
     return () => clearInterval(timer);
-  }, [user, selectedGameId, instances.length]);
+  }, [user, selectedGameId, instances.length, workspaceView]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setLaunchProgressTick(Date.now()), 1000);
@@ -1037,7 +1063,7 @@ export default function App() {
     for (const instance of instances) {
       const id = instanceId(instance);
       const notice = spotInterruptionNotice(instance, launchLogLines[id] ?? []);
-      if (!notice || spotNoticeNotifiedRef.current.has(id)) continue;
+      if (!notice || instance.spotAlertAcknowledgedAt || spotNoticeNotifiedRef.current.has(id)) continue;
       spotNoticeNotifiedRef.current.add(id);
       notify('error', `${instance.worldName || gameName(instance)}: ${notice.message}`);
     }
@@ -1905,10 +1931,46 @@ export default function App() {
       setUser(null);
       setInstances([]);
       setSelectedInstance(null);
+      setWorkspaceView('fleet');
       setLogs([]);
       setOperations({});
     } catch (error) {
       notify('error', error instanceof Error ? error.message : 'Sign out failed');
+    }
+  };
+
+  const handleOpenAlertHistory = async () => {
+    setWorkspaceView('alerts');
+    setInstancesLoading(true);
+    try {
+      setInstances(await listInstances());
+    } catch (error) {
+      notify('error', error instanceof Error ? error.message : 'Unable to load alert history');
+    } finally {
+      setInstancesLoading(false);
+    }
+  };
+
+  const handleAcknowledgeSpotAlert = async (instance: ServerInstance) => {
+    const id = instanceId(instance);
+    setAcknowledgingAlertIds((current) => new Set(current).add(id));
+    try {
+      const updated = await acknowledgeSpotAlert(id);
+      setInstances((current) => current.map((candidate) => (
+        instanceId(candidate) === id ? { ...candidate, ...updated } : candidate
+      )));
+      setSelectedInstance((current) => (
+        current && instanceId(current) === id ? { ...current, ...updated } : current
+      ));
+      notify('success', 'Alert cleared and retained in history');
+    } catch (error) {
+      notify('error', error instanceof Error ? error.message : 'Unable to clear alert');
+    } finally {
+      setAcknowledgingAlertIds((current) => {
+        const next = new Set(current);
+        next.delete(id);
+        return next;
+      });
     }
   };
 
@@ -1962,7 +2024,7 @@ export default function App() {
   const visibleWorlds = selectedGameId && selectedGameId !== 'all'
     ? worlds.filter((world) => worldGameId(world) === selectedGameId)
     : [];
-  const fleetSpotNotice = instances
+  const spotAlertHistory = instances
     .map((instance) => ({
       instance,
       notice: spotInterruptionNotice(instance, launchLogLines[instanceId(instance)] ?? []),
@@ -1972,7 +2034,9 @@ export default function App() {
       const aTime = Date.parse(a.notice.timestamp || a.instance.updatedAt?.toString() || '') || 0;
       const bTime = Date.parse(b.notice.timestamp || b.instance.updatedAt?.toString() || '') || 0;
       return bTime - aTime;
-    })[0];
+    });
+  const activeSpotAlerts = spotAlertHistory.filter((entry) => !entry.instance.spotAlertAcknowledgedAt);
+  const fleetSpotNotice = activeSpotAlerts[0];
 
   if (bootstrapping) {
     return (
@@ -2015,6 +2079,19 @@ export default function App() {
           <p>{user.displayName || user.username}</p>
         </div>
         <div className="user-info">
+          <button
+            type="button"
+            className={`btn alert-nav-btn ${workspaceView === 'alerts' ? 'active' : ''}`}
+            onClick={() => void handleOpenAlertHistory()}
+            aria-current={workspaceView === 'alerts' ? 'page' : undefined}
+          >
+            Alerts
+            {activeSpotAlerts.length > 0 ? (
+              <span className="alert-count" aria-label={`${activeSpotAlerts.length} uncleared alerts`}>
+                {activeSpotAlerts.length}
+              </span>
+            ) : null}
+          </button>
           <span>{user.email}</span>
           <button type="button" className="btn btn-danger" onClick={handleSignOut}>
             Sign out
@@ -2022,14 +2099,103 @@ export default function App() {
         </div>
       </header>
 
-      {fleetSpotNotice ? (
+      {workspaceView === 'alerts' ? (
+        <main className="alert-history-page">
+          <section className="panel alert-history-panel">
+            <div className="alert-history-head">
+              <div>
+                <span className="eyebrow">Operations record</span>
+                <h2>Alert history</h2>
+                <p>Cleared alerts stay here as a permanent operational record.</p>
+              </div>
+              <div className="alert-history-summary" aria-label="Alert summary">
+                <strong>{activeSpotAlerts.length}</strong>
+                <span>needs review</span>
+                <strong>{spotAlertHistory.length}</strong>
+                <span>total</span>
+              </div>
+              <button type="button" className="btn" onClick={() => setWorkspaceView('fleet')}>
+                Back to fleet
+              </button>
+            </div>
+
+            {instancesLoading && spotAlertHistory.length === 0 ? (
+              <div className="empty">Loading alert history…</div>
+            ) : spotAlertHistory.length === 0 ? (
+              <div className="alert-history-empty">
+                <strong>No alerts recorded</strong>
+                <span>Spot interruption and reclamation alerts will be retained here.</span>
+              </div>
+            ) : (
+              <div className="alert-history-list">
+                {spotAlertHistory.map(({ instance, notice }) => {
+                  const id = instanceId(instance);
+                  const acknowledgedAt = instance.spotAlertAcknowledgedAt;
+                  return (
+                    <article className={`alert-history-item ${acknowledgedAt ? 'reviewed' : 'active'}`} key={id}>
+                      <div className="alert-history-status" aria-hidden="true" />
+                      <div className="alert-history-copy">
+                        <div className="alert-history-title">
+                          <div>
+                            <span className="eyebrow">{gameName(instance)}</span>
+                            <h3>{instance.worldName || instance.serverName?.toString() || id}</h3>
+                          </div>
+                          <span className={`review-pill ${acknowledgedAt ? 'reviewed' : 'active'}`}>
+                            {acknowledgedAt ? 'Reviewed' : 'Needs review'}
+                          </span>
+                        </div>
+                        <strong>{notice.state === 'reclaimed' ? 'Spot instance reclaimed' : 'Spot interruption warning'}</strong>
+                        <p>{notice.message}</p>
+                        <dl className="alert-history-meta">
+                          <div><dt>Instance</dt><dd>{id}</dd></div>
+                          <div><dt>Alerted</dt><dd>{prettyDate(notice.timestamp)}</dd></div>
+                          <div><dt>Cleared</dt><dd>{prettyDate(acknowledgedAt)}</dd></div>
+                        </dl>
+                      </div>
+                      <div className="alert-history-actions">
+                        {acknowledgedAt ? null : (
+                          <button
+                            type="button"
+                            className="btn btn-success"
+                            disabled={acknowledgingAlertIds.has(id)}
+                            onClick={() => void handleAcknowledgeSpotAlert(instance)}
+                          >
+                            {acknowledgingAlertIds.has(id) ? 'Clearing…' : 'Mark reviewed'}
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          className="btn btn-small"
+                          onClick={() => {
+                            setSelectedInstance(instance);
+                            setDetailTab('overview');
+                            setWorkspaceView('fleet');
+                          }}
+                        >
+                          View instance
+                        </button>
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            )}
+          </section>
+        </main>
+      ) : null}
+
+      {workspaceView === 'fleet' && fleetSpotNotice ? (
         <section className="fleet-spot-notice" aria-label="AWS Spot interruption notice">
           <span>{fleetSpotNotice.instance.worldName || gameName(fleetSpotNotice.instance)}</span>
-          <SpotInterruptionAlert notice={fleetSpotNotice.notice} />
+          <SpotInterruptionAlert
+            notice={fleetSpotNotice.notice}
+            acknowledging={acknowledgingAlertIds.has(instanceId(fleetSpotNotice.instance))}
+            onAcknowledge={() => void handleAcknowledgeSpotAlert(fleetSpotNotice.instance)}
+          />
         </section>
       ) : null}
 
-      <main className={`dashboard-grid ${showSavedWorlds ? '' : 'saved-worlds-collapsed'}`}>
+      <main className={`dashboard-grid ${showSavedWorlds ? '' : 'saved-worlds-collapsed'} ${workspaceView === 'fleet' ? '' : 'workspace-hidden'}`}>
         <aside className={`panel saved-worlds-panel ${showSavedWorlds ? '' : 'panel-collapsed'}`}>
           {showSavedWorlds ? (
             <>
@@ -2085,7 +2251,7 @@ export default function App() {
                     const active = runtime.status !== 'offline';
                     const status = runtime.instance ? playerStatuses[instanceId(runtime.instance)] : undefined;
                     const launchProgress = runtime.instance ? launchProgressFor(runtime.instance) : undefined;
-                    const spotNotice = runtime.instance
+                    const spotNotice = runtime.instance && !runtime.instance.spotAlertAcknowledgedAt
                       ? spotInterruptionNotice(
                           runtime.instance,
                           launchLogLines[instanceId(runtime.instance)] ?? [],
@@ -2111,7 +2277,13 @@ export default function App() {
                           </div>
                           <span className={statusClassName(runtime.status)}>{runtime.status}</span>
                         </div>
-                        {spotNotice ? <SpotInterruptionAlert notice={spotNotice} /> : null}
+                        {spotNotice && runtime.instance ? (
+                          <SpotInterruptionAlert
+                            notice={spotNotice}
+                            acknowledging={acknowledgingAlertIds.has(instanceId(runtime.instance))}
+                            onAcknowledge={() => void handleAcknowledgeSpotAlert(runtime.instance!)}
+                          />
+                        ) : null}
                         {launchProgress && <LaunchProgressView progress={launchProgress} />}
                         <div className="world-meta">
                           <span>Bucket</span>
@@ -2304,7 +2476,9 @@ export default function App() {
                     const id = instanceId(instance);
                     const disabled = isOperationRunning(instance);
                     const launchProgress = launchProgressFor(instance);
-                    const spotNotice = spotInterruptionNotice(instance, launchLogLines[id] ?? []);
+                    const spotNotice = instance.spotAlertAcknowledgedAt
+                      ? undefined
+                      : spotInterruptionNotice(instance, launchLogLines[id] ?? []);
                     return (
                       <tr key={id}>
                         <td>{gameName(instance)}</td>
@@ -2313,7 +2487,14 @@ export default function App() {
                         <td>{instance.worldName || instance.selectedWorldId || '—'}</td>
                         <td>
                           <span className={statusClassName(instance.status)}>{normalizeStatus(instance.status)}</span>
-                          {spotNotice ? <SpotInterruptionAlert notice={spotNotice} compact /> : null}
+                          {spotNotice ? (
+                            <SpotInterruptionAlert
+                              notice={spotNotice}
+                              compact
+                              acknowledging={acknowledgingAlertIds.has(id)}
+                              onAcknowledge={() => void handleAcknowledgeSpotAlert(instance)}
+                            />
+                          ) : null}
                           {launchProgress && <LaunchProgressView progress={launchProgress} compact />}
                         </td>
                         <td>{instance.region || '—'}</td>
@@ -2449,7 +2630,7 @@ export default function App() {
               <div className="tab-content">
                 {detailTab === 'overview' && (
                   <article className="overview">
-                    {spotInterruptionNotice(
+                    {!selectedInstance.spotAlertAcknowledgedAt && spotInterruptionNotice(
                       selectedInstance,
                       launchLogLines[instanceId(selectedInstance)] ?? [],
                     ) ? (
@@ -2459,6 +2640,8 @@ export default function App() {
                             selectedInstance,
                             launchLogLines[instanceId(selectedInstance)] ?? [],
                           )!}
+                          acknowledging={acknowledgingAlertIds.has(instanceId(selectedInstance))}
+                          onAcknowledge={() => void handleAcknowledgeSpotAlert(selectedInstance)}
                         />
                       </div>
                     ) : null}
