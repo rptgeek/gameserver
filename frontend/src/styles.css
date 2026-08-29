@@ -852,6 +852,29 @@ tbody tr:hover {
   color: #9fb2ff;
 }
 
+.log-following-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: #86eadb;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.log-following-status::before {
+  content: '';
+  width: 0.45rem;
+  height: 0.45rem;
+  border-radius: 50%;
+  background: var(--accent-2);
+  box-shadow: 0 0 0 3px rgba(45, 231, 203, 0.12);
+}
+
+.log-latest-btn {
+  border-color: rgba(45, 231, 203, 0.55);
+  color: #9af4e6;
+}
+
 .log-output {
   min-height: 360px;
   background: #050917;
@@ -863,6 +886,18 @@ tbody tr:hover {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.84rem;
   margin: 0;
+}
+
+.log-output-stream {
+  height: clamp(340px, 56vh, 620px);
+  min-height: 0;
+  max-height: 620px;
+  line-height: 1.42;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  scroll-behavior: smooth;
 }
 
 .config-panel {

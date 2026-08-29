@@ -104,6 +104,7 @@ interface SpotInterruptionNotice {
 }
 
 const LAUNCH_LOG_HISTORY_LIMIT = 800;
+const LOG_VIEW_LINE_LIMIT = 250;
 
 interface Toast {
   id: string;
@@ -762,6 +763,8 @@ export default function App() {
   const [logsLoading, setLogsLoading] = useState(false);
   const [logsAutoRefresh, setLogsAutoRefresh] = useState(true);
   const [logsLive, setLogsLive] = useState(false);
+  const [logsFollowing, setLogsFollowing] = useState(true);
+  const [showAllLogLines, setShowAllLogLines] = useState(false);
   const [logsNextToken, setLogsNextToken] = useState<string | undefined>(undefined);
   const [logsClearMarker, setLogsClearMarker] = useState<string | null>(null);
   const [serverCommand, setServerCommand] = useState('');
@@ -815,6 +818,7 @@ export default function App() {
   const pollRef = useRef<Record<string, number>>({});
   const spotNoticeNotifiedRef = useRef<Set<string>>(new Set());
   const logStreamRef = useRef<AbortController | null>(null);
+  const logOutputRef = useRef<HTMLPreElement | null>(null);
   const runtimeServerEditorRef = useRef<HTMLTextAreaElement | null>(null);
   const runtimeWorldEditorRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -1230,6 +1234,8 @@ export default function App() {
     setLogs([]);
     setLogsClearMarker(null);
     setLogsNextToken(undefined);
+    setLogsFollowing(true);
+    setShowAllLogLines(false);
     const kind: LogType = detailTab === 'bootstrap-logs' ? 'bootstrap' : 'server';
     const load = async () => {
       setLogsLoading(true);
@@ -1455,6 +1461,8 @@ export default function App() {
       const response = await getLogs(instanceId(selectedInstance), kind, logsNextToken);
       setLogs((previous) => [...previous, ...response.lines]);
       setLogsNextToken(response.nextToken);
+      setShowAllLogLines(true);
+      setLogsFollowing(false);
     } catch (error) {
       notify('error', error instanceof Error ? error.message : 'Failed to load additional logs');
     } finally {
@@ -1464,12 +1472,40 @@ export default function App() {
 
   const handleClearLogsView = () => {
     setLogsClearMarker(logs.length > 0 ? logs[logs.length - 1] : null);
+    setLogsFollowing(true);
+    setShowAllLogLines(false);
   };
 
-  const visibleLogs = logsClearMarker
-    ? logs.slice(logs.lastIndexOf(logsClearMarker) >= 0 ? logs.lastIndexOf(logsClearMarker) + 1 : 0)
-    : logs;
-  const visibleLogText = useMemo(() => visibleLogs.join('\n'), [visibleLogs]);
+  const visibleLogs = useMemo(() => (
+    logsClearMarker
+      ? logs.slice(logs.lastIndexOf(logsClearMarker) >= 0 ? logs.lastIndexOf(logsClearMarker) + 1 : 0)
+      : logs
+  ), [logs, logsClearMarker]);
+  const displayedLogs = useMemo(
+    () => (showAllLogLines ? visibleLogs : visibleLogs.slice(-LOG_VIEW_LINE_LIMIT)),
+    [showAllLogLines, visibleLogs],
+  );
+  const hiddenLogLineCount = visibleLogs.length - displayedLogs.length;
+  const visibleLogText = useMemo(() => displayedLogs.join('\n'), [displayedLogs]);
+
+  useEffect(() => {
+    if (!logsFollowing) return;
+    const output = logOutputRef.current;
+    if (!output) return;
+    const frame = window.requestAnimationFrame(() => {
+      output.scrollTop = output.scrollHeight;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [visibleLogText, logsFollowing, detailTab]);
+
+  const jumpToLatestLogs = () => {
+    setShowAllLogLines(false);
+    setLogsFollowing(true);
+    window.requestAnimationFrame(() => {
+      const output = logOutputRef.current;
+      if (output) output.scrollTop = output.scrollHeight;
+    });
+  };
 
   const handleOpenAddModal = () => {
     setAddForm({
@@ -2773,12 +2809,22 @@ export default function App() {
                         <input
                           type="checkbox"
                           checked={logsAutoRefresh}
-                          onChange={(event) => setLogsAutoRefresh(event.target.checked)}
+                          onChange={(event) => {
+                            setLogsAutoRefresh(event.target.checked);
+                            if (event.target.checked) setLogsFollowing(true);
+                          }}
                         />
                         Auto-refresh
                       </label>
                       <label>
-                        <input type="checkbox" checked={logsLive} onChange={(event) => setLogsLive(event.target.checked)} />
+                        <input
+                          type="checkbox"
+                          checked={logsLive}
+                          onChange={(event) => {
+                            setLogsLive(event.target.checked);
+                            if (event.target.checked) setLogsFollowing(true);
+                          }}
+                        />
                         Live stream
                       </label>
                       {logsNextToken && (
@@ -2789,10 +2835,45 @@ export default function App() {
                       <button type="button" className="btn btn-small" onClick={handleClearLogsView} disabled={logs.length === 0}>
                         Clear view
                       </button>
+                      {visibleLogs.length > LOG_VIEW_LINE_LIMIT ? (
+                        <button
+                          type="button"
+                          className="btn btn-small"
+                          onClick={() => {
+                            setShowAllLogLines((current) => !current);
+                            setLogsFollowing(true);
+                          }}
+                        >
+                          {showAllLogLines ? `Show latest ${LOG_VIEW_LINE_LIMIT}` : `Show all ${visibleLogs.length}`}
+                        </button>
+                      ) : null}
+                      {!logsFollowing ? (
+                        <button type="button" className="btn btn-small log-latest-btn" onClick={jumpToLatestLogs}>
+                          Jump to latest
+                        </button>
+                      ) : (
+                        <span className="log-following-status">Following latest</span>
+                      )}
                       {logsLoading && logs.length > 0 && <span className="log-filter-note">Refreshing…</span>}
                       {logsClearMarker && <span className="log-filter-note">Showing new lines only</span>}
+                      {hiddenLogLineCount > 0 ? (
+                        <span className="log-filter-note">Latest {displayedLogs.length} of {visibleLogs.length} loaded lines</span>
+                      ) : null}
                     </div>
-                    <pre className="log-output">{visibleLogText || (logsLoading ? 'Loading logs…' : 'No log lines.')}</pre>
+                    <pre
+                      ref={logOutputRef}
+                      className="log-output log-output-stream"
+                      tabIndex={0}
+                      role="log"
+                      aria-label={`${detailTab === 'bootstrap-logs' ? 'Bootstrap' : 'Server'} logs`}
+                      onScroll={(event) => {
+                        const output = event.currentTarget;
+                        const distanceFromBottom = output.scrollHeight - output.scrollTop - output.clientHeight;
+                        setLogsFollowing(distanceFromBottom <= 48);
+                      }}
+                    >
+                      {visibleLogText || (logsLoading ? 'Loading logs…' : 'No log lines.')}
+                    </pre>
                   </div>
                 )}
 
