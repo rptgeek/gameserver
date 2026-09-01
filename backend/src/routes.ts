@@ -2240,6 +2240,9 @@ async function createInstancesForSpec(
         VolumeType: VolumeType.gp3,
         Encrypted: true,
         DeleteOnTermination: true,
+        ...(launchImage.amiSource === "baked"
+          ? { VolumeInitializationRate: 300 }
+          : {}),
       },
     },
   ];
