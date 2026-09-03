@@ -1,4 +1,5 @@
 import React, { useId, useMemo, useState } from 'react';
+import { nextTabIndex } from './uiSemantics';
 
 type ConfigFieldType = 'text' | 'password' | 'number' | 'boolean' | 'select' | 'textarea';
 type ConfigTabId = 'identity' | 'network' | 'world' | 'sandbox' | 'gameplay' | 'population' | 'claims' | 'system' | 'other' | 'raw';
@@ -487,11 +488,23 @@ export default function ServerConfigEditor({ xml, onChange, disabled = false, co
         {availableTabs.map((tab, index) => (
           <button
             key={tab.id}
+            id={`${idPrefix}-tab-${tab.id}`}
             type="button"
             role="tab"
             className={!normalizedSearch && activeTab === tab.id ? 'active' : ''}
-            aria-selected={!normalizedSearch && activeTab === tab.id}
+            aria-selected={activeTab === tab.id}
+            aria-controls={`${idPrefix}-panel`}
+            tabIndex={activeTab === tab.id ? 0 : -1}
             onClick={() => { setRequestedTab(tab.id); setSearch(''); }}
+            onKeyDown={(event) => {
+              if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+              event.preventDefault();
+              const tabs = Array.from(event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]') ?? []);
+              const currentIndex = tabs.indexOf(event.currentTarget);
+              const nextIndex = nextTabIndex(currentIndex, event.key, tabs.length);
+              tabs[nextIndex]?.focus();
+              tabs[nextIndex]?.click();
+            }}
           >
             <span>{String(index + 1).padStart(2, '0')}</span>
             {tab.shortLabel}
@@ -502,6 +515,11 @@ export default function ServerConfigEditor({ xml, onChange, disabled = false, co
       {parsed.error ? <div className="server-config-parse-error"><strong>XML needs attention</strong><span>{parsed.error}</span></div> : null}
       {hasSandboxCode && parsedSandbox.error ? <div className="server-config-parse-error"><strong>Sandbox code needs attention</strong><span>{parsedSandbox.error}</span></div> : null}
 
+      <div
+        id={`${idPrefix}-panel`}
+        role="tabpanel"
+        aria-labelledby={`${idPrefix}-tab-${activeTab}`}
+      >
       {activeTab === 'raw' && !normalizedSearch ? (
         <section className="server-config-raw">
           <div>
@@ -563,6 +581,7 @@ export default function ServerConfigEditor({ xml, onChange, disabled = false, co
           ))}
         </div>
       )}
+      </div>
     </div>
   );
 }

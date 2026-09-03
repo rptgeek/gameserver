@@ -60,7 +60,7 @@ function normalizeList<T>(payload: unknown, fallbackKeys: string[] = []): T[] {
   return [];
 }
 
-type ApiRequestInit = RequestInit & { idempotencyKey?: string };
+type ApiRequestInit = Omit<RequestInit, 'body'> & { body?: unknown; idempotencyKey?: string };
 
 async function request<T>(path: string, init: ApiRequestInit = {}, query?: Query): Promise<T> {
   const token = await getAuthToken();
@@ -68,7 +68,7 @@ async function request<T>(path: string, init: ApiRequestInit = {}, query?: Query
   const headers = new Headers(fetchInit.headers || {});
   headers.set('Accept', 'application/json');
 
-  let body = fetchInit.body;
+  let body: BodyInit | null | undefined;
   if (typeof fetchInit.body === 'string') {
     headers.set('Content-Type', 'application/json');
   } else if (fetchInit.body && typeof fetchInit.body !== 'string' && !(fetchInit.body instanceof FormData)) {

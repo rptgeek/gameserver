@@ -1,6 +1,19 @@
 import React from 'react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import ServerConfigEditor, { serverConfigXmlValidationError } from './ServerConfigEditor';
+import AccessibleDialog from './AccessibleDialog';
+import InstanceDetailTabs from './InstanceDetailTabs';
+import type { InstanceDetailTab } from './InstanceDetailTabs';
+import { AdvancedConfigDisclosure, LaunchStartButton } from './LaunchControls';
+import {
+  GAME_SERVER_ACTION_LABELS,
+  INSTANCE_ACTION_LABELS,
+  deleteRestorePointConfirmation,
+  deleteWorldConfirmation,
+  launchButtonLabel,
+  launchDisabledReason,
+  terminateInstanceConfirmation,
+} from './uiSemantics';
 import {
   getCurrentUserProfile,
   initializeAuth,
@@ -57,7 +70,7 @@ import type {
   WorldRuntimeInfo,
 } from './types';
 
-type DetailTab = 'overview' | 'bootstrap-logs' | 'server-logs' | 'console' | 'config';
+type DetailTab = InstanceDetailTab;
 type WorkspaceView = 'fleet' | 'alerts';
 type WindroseJsonFocus = 'server' | 'world';
 type LaunchPhaseKey =
@@ -344,7 +357,7 @@ function launchPhasesFor(instance: ServerInstance): LaunchPhaseDefinition[] {
   return String(instance.amiSource || '').toLowerCase() === 'baked' ? BAKED_LAUNCH_PHASES : LAUNCH_PHASES;
 }
 
-function mergeLaunchLogLines(existing: string[] | undefined, incoming: string[]): string[] {
+function mergeLaunchLogLines(existing: string[] | undefined, incoming: readonly string[]): string[] {
   const seen = new Set<string>();
   const merged: string[] = [];
   for (const line of [...(existing || []), ...incoming]) {
@@ -625,7 +638,15 @@ function LaunchProgressView({
         <strong>{progress.phase.label}</strong>
         <span>{progress.ready ? 'Ready' : progress.remainingLabel || `${formatDuration(progress.remainingSeconds)} left`}</span>
       </div>
-      <div className="launch-progress-track" aria-label="Launch progress">
+      <div
+        className="launch-progress-track"
+        role="progressbar"
+        aria-label="Launch progress"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={Math.round(progress.percent)}
+        aria-valuetext={`${progress.phase.label}, ${progress.ready ? 'ready' : progress.remainingLabel || `${formatDuration(progress.remainingSeconds)} remaining`}`}
+      >
         <span style={{ width: `${progress.percent}%` }} />
       </div>
       {!compact && (
@@ -773,6 +794,7 @@ export default function App() {
   const [toasts, setToasts] = useState<Toast[]>([]);
 
   const [showAddInstance, setShowAddInstance] = useState(false);
+  const [launchAdvancedOpen, setLaunchAdvancedOpen] = useState(false);
   const [addForm, setAddForm] = useState<InstanceForm>({
     gameId: '',
     region: 'us-east-1',
@@ -808,6 +830,15 @@ export default function App() {
     () => serverConfigXmlValidationError(serverConfigXml),
     [serverConfigXml],
   );
+  const requiredLaunchConfigError = supportsServerConfig(addForm.gameId) ? serverConfigValidationError : '';
+  const startInstanceDisabledReason = launchDisabledReason({
+    missingGame: !addForm.gameId,
+    missingWorld: addForm.gameId.toLowerCase() === '7d2d' && !addForm.selectedWorldId,
+    configLoading: serverConfigLoading,
+    configSaving: serverConfigSaving,
+    instanceCreating,
+    validationError: requiredLaunchConfigError,
+  });
   const [runtimeServerJson, setRuntimeServerJson] = useState('{}');
   const [runtimeWorldJson, setRuntimeWorldJson] = useState('{}');
   const [runtimeServerKey, setRuntimeServerKey] = useState('');
@@ -1313,10 +1344,8 @@ export default function App() {
       return;
     }
     if (kind === 'terminate') {
-      const label = instance.serverName || instance.name || instance.instanceId || 'this instance';
-      const confirmed = window.confirm(
-        `Terminate ${label}?\n\nThis will run the final backup flow and then terminate the EC2 instance.`,
-      );
+      const label = String(instance.serverName || instance.name || instance.instanceId || 'this instance');
+      const confirmed = window.confirm(terminateInstanceConfirmation(label));
       if (!confirmed) {
         return;
       }
@@ -1508,6 +1537,7 @@ export default function App() {
   };
 
   const handleOpenAddModal = () => {
+    setLaunchAdvancedOpen(false);
     setAddForm({
       gameId:
         selectedGameId && selectedGameId !== 'all'
@@ -1560,6 +1590,7 @@ export default function App() {
   };
 
   const handleConfigureWorldLaunch = async (world: WorldPreset) => {
+    setLaunchAdvancedOpen(false);
     const gameId = worldGameId(world);
     if (!gameId) {
       notify('error', 'World is missing a game id');
@@ -1592,6 +1623,12 @@ export default function App() {
     }
     loadPresetsForGame(addForm.gameId);
   }, [showAddInstance, addForm.gameId]);
+
+  useEffect(() => {
+    if (showAddInstance && supportsServerConfig(addForm.gameId) && (serverConfigLoading || Boolean(serverConfigValidationError))) {
+      setLaunchAdvancedOpen(true);
+    }
+  }, [showAddInstance, addForm.gameId, serverConfigLoading, serverConfigValidationError]);
 
   const handleCreateInstance = async () => {
     if (!addForm.gameId) {
@@ -1870,7 +1907,7 @@ export default function App() {
 
   const handleDeleteRestorePoint = async (restorePoint: RestorePoint) => {
     if (!restorePointWorld) return;
-    if (!window.confirm(`Delete restore point “${restorePoint.name}”? This cannot be undone from the console.`)) {
+    if (!window.confirm(deleteRestorePointConfirmation(restorePoint.name))) {
       return;
     }
     const gameId = worldGameId(restorePointWorld);
@@ -1896,9 +1933,7 @@ export default function App() {
       notify('error', 'Stop the running server before deleting this world');
       return;
     }
-    const confirmed = window.confirm(
-      `Delete ${world.name}? This removes the saved world record and S3 save data for this world.`,
-    );
+    const confirmed = window.confirm(deleteWorldConfirmation(world.name));
     if (!confirmed) {
       return;
     }
@@ -2271,15 +2306,22 @@ export default function App() {
                     Show terminated
                   </label>
                   <button type="button" className="btn btn-success" onClick={handleOpenAddModal}>
-                    Add instance
+                    Start AWS instance
                   </button>
                 </div>
               </div>
 
               {selectedGameId === 'all' || !selectedGameId ? (
-                <div className="empty">Choose a game to see saved worlds from its S3 save paths.</div>
+                <div className="empty empty-state">
+                  <strong>Choose a game to get started</strong>
+                  <span>Saved worlds and their live status will appear here.</span>
+                </div>
               ) : visibleWorlds.length === 0 ? (
-                <div className="empty">No saved worlds found for this game. Create a world preset to launch from S3.</div>
+                <div className="empty empty-state">
+                  <strong>No saved worlds yet</strong>
+                  <span>Create an AWS instance and save a world preset from the launch window.</span>
+                  <button type="button" className="btn btn-success" onClick={handleOpenAddModal}>Open launch setup</button>
+                </div>
               ) : (
                 <div className="world-grid">
                   {visibleWorlds.map((world) => {
@@ -2321,11 +2363,7 @@ export default function App() {
                           />
                         ) : null}
                         {launchProgress && <LaunchProgressView progress={launchProgress} />}
-                        <div className="world-meta">
-                          <span>Bucket</span>
-                          <strong>{worldBucket(world, profiles)}</strong>
-                          <span>S3 path</span>
-                          <strong>{worldS3Prefix(world)}/state</strong>
+                        <div className="world-meta world-meta-primary">
                           <span>Last backup</span>
                           <strong>{prettyDate(runtime.lastBackupAt)}</strong>
                           {typeof world.restoredFromRestorePointId === 'string' ? (
@@ -2343,16 +2381,28 @@ export default function App() {
                           <CopyableIp ip={runtime.publicIp} onCopy={handleCopyIpAddress} />
                           <span>Players</span>
                           <strong>{playerSummary(status)}</strong>
-                          <span>Version</span>
-                          <strong>{status?.serverVersion || '—'}</strong>
-                          <span>Player check</span>
-                          <strong>{prettyDate(status?.lastUpdatedAt)}</strong>
                           {worldGameId(world).toLowerCase() === 'windrose' && (
                             <>
                               <span>Invite code</span>
                               <strong>{inviteCode || 'Available after first backup'}</strong>
                               <span>Server name</span>
                               <strong>{runtimeInfo?.serverName || '—'}</strong>
+                            </>
+                          )}
+                        </div>
+                        <details className="disclosure technical-details">
+                          <summary>Technical details</summary>
+                          <div className="world-meta">
+                            <span>Bucket</span>
+                            <strong>{worldBucket(world, profiles)}</strong>
+                            <span>S3 path</span>
+                            <strong>{worldS3Prefix(world)}/state</strong>
+                            <span>Version</span>
+                            <strong>{status?.serverVersion || '—'}</strong>
+                            <span>Player check</span>
+                            <strong>{prettyDate(status?.lastUpdatedAt)}</strong>
+                            {worldGameId(world).toLowerCase() === 'windrose' && (
+                              <>
                               <span>Max players</span>
                               <strong>{runtimeInfo?.maxPlayerCount ?? '—'}</strong>
                               <span>World island</span>
@@ -2381,17 +2431,18 @@ export default function App() {
                                   Edit
                                 </button>
                               </strong>
-                            </>
-                          )}
-                        </div>
-                        <div className="row-actions">
+                              </>
+                            )}
+                          </div>
+                        </details>
+                        <div className="row-actions world-primary-actions">
                           <button
                             type="button"
                             className="btn btn-success"
                             disabled={active || busy === 'launching'}
                             onClick={() => handleConfigureWorldLaunch(world)}
                           >
-                            {busy === 'launching' ? 'Launching...' : 'Configure & launch'}
+                            {busy === 'launching' ? 'Starting AWS instance…' : 'Configure & start'}
                           </button>
                           {runtime.instance && (
                             <button
@@ -2402,64 +2453,26 @@ export default function App() {
                                 setDetailTab(active ? 'server-logs' : 'overview');
                               }}
                             >
-                              {active ? 'View running server' : 'View last launch'}
+                              {active ? 'Manage server' : 'View last run'}
                             </button>
                           )}
-                          <button
-                            type="button"
-                            className="btn btn-small"
-                            disabled={Boolean(busy)}
-                            onClick={() => handleCopyWorld(world)}
-                          >
-                            {busy === 'copying' ? 'Cloning save...' : 'Clone & launch'}
-                          </button>
-                          {worldGameId(world).toLowerCase() === '7d2d' ? (
-                            <button
-                              type="button"
-                              className="btn btn-small btn-restore"
-                              disabled={Boolean(busy)}
-                              onClick={() => handleOpenRestorePoints(world)}
-                            >
-                              Restore points
-                            </button>
-                          ) : null}
-                          {inviteCode && (
-                            <button
-                              type="button"
-                              className="btn btn-small"
-                              onClick={() => handleCopyInviteCode(inviteCode)}
-                            >
-                              Copy invite
-                            </button>
-                          )}
-                          {monitorUrl && (
-                            <a
-                              className="btn btn-small"
-                              href={monitorUrl}
-                              target="_blank"
-                              rel="noreferrer"
-                            >
-                              Monitor
-                            </a>
-                          )}
-                          {dashboardUrl && (
-                            <a
-                              className="btn btn-small"
-                              href={dashboardUrl}
-                              target="_blank"
-                              rel="noreferrer"
-                            >
-                              Web dashboard
-                            </a>
-                          )}
-                          <button
-                            type="button"
-                            className="btn btn-small btn-danger"
-                            disabled={active || Boolean(busy)}
-                            onClick={() => handleDeleteWorld(world, active)}
-                          >
-                            {busy === 'deleting' ? 'Deleting...' : 'Delete'}
-                          </button>
+                          <details className="action-menu">
+                            <summary>More actions</summary>
+                            <div className="action-menu-content">
+                              <button type="button" className="btn btn-small" disabled={Boolean(busy)} onClick={() => handleCopyWorld(world)}>
+                                {busy === 'copying' ? 'Cloning save…' : 'Clone and start'}
+                              </button>
+                              {worldGameId(world).toLowerCase() === '7d2d' ? (
+                                <button type="button" className="btn btn-small btn-restore" disabled={Boolean(busy)} onClick={() => handleOpenRestorePoints(world)}>Restore points</button>
+                              ) : null}
+                              {inviteCode && <button type="button" className="btn btn-small" onClick={() => handleCopyInviteCode(inviteCode)}>Copy invite code</button>}
+                              {monitorUrl && <a className="btn btn-small" href={monitorUrl} target="_blank" rel="noreferrer">Open monitor</a>}
+                              {dashboardUrl && <a className="btn btn-small" href={dashboardUrl} target="_blank" rel="noreferrer">Open web dashboard</a>}
+                              <button type="button" className="btn btn-small btn-danger" disabled={active || Boolean(busy)} onClick={() => handleDeleteWorld(world, active)}>
+                                {busy === 'deleting' ? 'Deleting…' : 'Delete saved world'}
+                              </button>
+                            </div>
+                          </details>
                         </div>
                       </article>
                     );
@@ -2487,11 +2500,22 @@ export default function App() {
 
         <div className="main-workspace">
           <section className="panel">
+          <div className="panel-head">
+            <div>
+              <span className="eyebrow">Compute</span>
+              <h2>AWS instances</h2>
+            </div>
+            <span className="panel-head-note">Manage the EC2 hosts that run your game servers.</span>
+          </div>
           <div className="table-wrap">
             {instancesLoading ? (
               <div className="empty">Loading instances…</div>
             ) : visibleInstances.length === 0 ? (
-              <div className="empty">No instances found.</div>
+              <div className="empty empty-state">
+                <strong>No AWS instances found</strong>
+                <span>Start an instance to host one of your saved worlds.</span>
+                <button type="button" className="btn btn-success" onClick={handleOpenAddModal}>Start an AWS instance</button>
+              </div>
             ) : (
               <table>
                 <thead>
@@ -2517,11 +2541,11 @@ export default function App() {
                       : spotInterruptionNotice(instance, launchLogLines[id] ?? []);
                     return (
                       <tr key={id}>
-                        <td>{gameName(instance)}</td>
-                        <td>{id}</td>
-                        <td>{instanceType(instance)}</td>
-                        <td>{instance.worldName || instance.selectedWorldId || '—'}</td>
-                        <td>
+                        <td data-label="Game">{gameName(instance)}</td>
+                        <td data-label="Instance ID">{id}</td>
+                        <td data-label="Instance type">{instanceType(instance)}</td>
+                        <td data-label="World">{instance.worldName || instance.selectedWorldId || '—'}</td>
+                        <td data-label="Status">
                           <span className={statusClassName(instance.status)}>{normalizeStatus(instance.status)}</span>
                           {spotNotice ? (
                             <SpotInterruptionAlert
@@ -2533,65 +2557,33 @@ export default function App() {
                           ) : null}
                           {launchProgress && <LaunchProgressView progress={launchProgress} compact />}
                         </td>
-                        <td>{instance.region || '—'}</td>
-                        <td><CopyableIp ip={instance.publicIp} onCopy={handleCopyIpAddress} /></td>
-                        <td>{prettyDate(instance.startedAt)}</td>
-                        <td>
-                          <div className="row-actions">
+                        <td data-label="Region">{instance.region || '—'}</td>
+                        <td data-label="Public IP"><CopyableIp ip={instance.publicIp} onCopy={handleCopyIpAddress} /></td>
+                        <td data-label="Started">{prettyDate(instance.startedAt)}</td>
+                        <td data-label="Actions">
+                          <div className="row-actions instance-row-actions">
                             <button
                               type="button"
-                              className="btn btn-small"
+                              className="btn btn-small btn-success"
                               onClick={() => {
                                 setSelectedInstance(instance);
                                 setDetailTab('overview');
                               }}
                             >
-                              Overview
+                              Manage
                             </button>
-                            <button
-                              type="button"
-                              className="btn btn-small"
-                              onClick={() => {
-                                setSelectedInstance(instance);
-                                setDetailTab('bootstrap-logs');
-                              }}
-                            >
-                              Logs
-                            </button>
-                            <button
-                              type="button"
-                              className="btn btn-small"
-                              onClick={() => {
-                                setSelectedInstance(instance);
-                                setDetailTab('config');
-                              }}
-                            >
-                              Config
-                            </button>
-                            <button className="btn btn-small" disabled={disabled} onClick={() => handleAction(instance, 'start')}>
-                              Launch
-                            </button>
-                            <button
-                              className="btn btn-small"
-                              disabled={disabled}
-                              onClick={() => handleAction(instance, 'stop')}
-                            >
-                              Shutdown
-                            </button>
-                            <button
-                              className="btn btn-small"
-                              disabled={disabled}
-                              onClick={() => handleAction(instance, 'restart')}
-                            >
-                              Restart
-                            </button>
-                            <button
-                              className="btn btn-small btn-danger"
-                              disabled={disabled}
-                              onClick={() => handleAction(instance, 'terminate')}
-                            >
-                              Terminate
-                            </button>
+                            <details className="action-menu action-menu-table">
+                              <summary>More</summary>
+                              <div className="action-menu-content">
+                                <button type="button" className="btn btn-small" onClick={() => { setSelectedInstance(instance); setDetailTab('bootstrap-logs'); }}>View logs</button>
+                                <button type="button" className="btn btn-small" onClick={() => { setSelectedInstance(instance); setDetailTab('config'); }}>Edit configuration</button>
+                                <div className="action-menu-label">AWS instance</div>
+                                <button type="button" className="btn btn-small" disabled={disabled} onClick={() => handleAction(instance, 'start')}>{INSTANCE_ACTION_LABELS.start}</button>
+                                <button type="button" className="btn btn-small" disabled={disabled} onClick={() => handleAction(instance, 'stop')}>{INSTANCE_ACTION_LABELS.stop}</button>
+                                <button type="button" className="btn btn-small" disabled={disabled} onClick={() => handleAction(instance, 'restart')}>{INSTANCE_ACTION_LABELS.restart}</button>
+                                <button type="button" className="btn btn-small btn-danger" disabled={disabled} onClick={() => handleAction(instance, 'terminate')}>{INSTANCE_ACTION_LABELS.terminate}</button>
+                              </div>
+                            </details>
                           </div>
                         </td>
                       </tr>
@@ -2626,44 +2618,13 @@ export default function App() {
             </div>
           ) : (
             <>
-              <div className="tabs" role="tablist">
-                <button
-                  type="button"
-                  className={`tab-btn ${detailTab === 'overview' ? 'active' : ''}`}
-                  onClick={() => setDetailTab('overview')}
-                >
-                  Overview
-                </button>
-                <button
-                  type="button"
-                  className={`tab-btn ${detailTab === 'bootstrap-logs' ? 'active' : ''}`}
-                  onClick={() => setDetailTab('bootstrap-logs')}
-                >
-                  Bootstrap Logs
-                </button>
-                <button
-                  type="button"
-                  className={`tab-btn ${detailTab === 'server-logs' ? 'active' : ''}`}
-                  onClick={() => setDetailTab('server-logs')}
-                >
-                  Server Logs
-                </button>
-                <button
-                  type="button"
-                  className={`tab-btn ${detailTab === 'console' ? 'active' : ''}`}
-                  onClick={() => setDetailTab('console')}
-                >
-                  Console
-                </button>
-                <button
-                  type="button"
-                  className={`tab-btn ${detailTab === 'config' ? 'active' : ''}`}
-                  onClick={() => setDetailTab('config')}
-                >
-                  Config
-                </button>
-              </div>
-              <div className="tab-content">
+              <InstanceDetailTabs activeTab={detailTab} onChange={setDetailTab} />
+              <div
+                id="instance-detail-panel"
+                className="tab-content"
+                role="tabpanel"
+                aria-labelledby={`instance-tab-${detailTab}`}
+              >
                 {detailTab === 'overview' && (
                   <article className="overview">
                     {!selectedInstance.spotAlertAcknowledgedAt && spotInterruptionNotice(
@@ -2726,7 +2687,12 @@ export default function App() {
                         <LaunchProgressView progress={launchProgressFor(selectedInstance)!} />
                       </div>
                     )}
-                    <div className="row-actions actions">
+                    <section className="overview-action-group overview-wide" aria-labelledby="game-server-actions-title">
+                      <div className="action-group-heading">
+                        <h3 id="game-server-actions-title">Game server</h3>
+                        <span>Controls the game process without changing the AWS instance.</span>
+                      </div>
+                      <div className="row-actions actions">
                       {supportsRuntimeJsonConfig(instanceGameId(selectedInstance)) && windroseMonitorUrl(selectedInstance.publicIp) && (
                         <a
                           className="btn btn-small"
@@ -2752,53 +2718,60 @@ export default function App() {
                         disabled={isOperationRunning(selectedInstance)}
                         onClick={() => handleServerAction(selectedInstance, 'start')}
                       >
-                        Start {runtimeServerLabel(selectedInstance)}
+                        {GAME_SERVER_ACTION_LABELS.start}
                       </button>
                       <button
                         className="btn btn-small"
                         disabled={isOperationRunning(selectedInstance)}
                         onClick={() => handleServerAction(selectedInstance, 'stop')}
                       >
-                        Stop {runtimeServerLabel(selectedInstance)}
+                        {GAME_SERVER_ACTION_LABELS.stop}
                       </button>
                       <button
                         className="btn btn-small"
                         disabled={isOperationRunning(selectedInstance)}
                         onClick={() => handleServerAction(selectedInstance, 'restart')}
                       >
-                        Restart {runtimeServerLabel(selectedInstance)}
+                        {GAME_SERVER_ACTION_LABELS.restart}
                       </button>
-                    </div>
-                    <div className="row-actions actions">
+                      </div>
+                    </section>
+                    <section className="overview-action-group overview-wide" aria-labelledby="aws-instance-actions-title">
+                      <div className="action-group-heading">
+                        <h3 id="aws-instance-actions-title">AWS instance</h3>
+                        <span>Controls the billed EC2 host. Terminating deletes the host permanently.</span>
+                      </div>
+                      <div className="row-actions actions">
                       <button
                         className="btn btn-small"
                         disabled={isOperationRunning(selectedInstance)}
                         onClick={() => handleAction(selectedInstance, 'start')}
                       >
-                        Launch
+                        {INSTANCE_ACTION_LABELS.start}
                       </button>
                       <button
                         className="btn btn-small"
                         disabled={isOperationRunning(selectedInstance)}
                         onClick={() => handleAction(selectedInstance, 'stop')}
                       >
-                        Shutdown
+                        {INSTANCE_ACTION_LABELS.stop}
                       </button>
                       <button
                         className="btn btn-small"
                         disabled={isOperationRunning(selectedInstance)}
                         onClick={() => handleAction(selectedInstance, 'restart')}
                       >
-                        Restart
+                        {INSTANCE_ACTION_LABELS.restart}
                       </button>
                       <button
                         className="btn btn-small btn-danger"
                         disabled={isOperationRunning(selectedInstance)}
                         onClick={() => handleAction(selectedInstance, 'terminate')}
                       >
-                        Terminate
+                        {INSTANCE_ACTION_LABELS.terminate}
                       </button>
-                    </div>
+                      </div>
+                    </section>
                   </article>
                 )}
 
@@ -3126,9 +3099,16 @@ export default function App() {
       ) : null}
 
       {showAddInstance && (
-        <div className="modal-backdrop" role="dialog" aria-modal="true">
+        <AccessibleDialog labelledBy="launch-dialog-title" describedBy="launch-dialog-description" onClose={() => setShowAddInstance(false)}>
           <div className="modal launch-modal">
-            <h3>Configure launch</h3>
+            <div className="launch-modal-heading">
+              <div>
+                <span className="eyebrow">New host</span>
+                <h3 id="launch-dialog-title">Start an AWS instance</h3>
+                <p id="launch-dialog-description">Choose the game and saved world. Optional configuration is available below.</p>
+              </div>
+              <button type="button" className="btn btn-small" data-autofocus onClick={() => setShowAddInstance(false)} aria-label="Close launch window">Close</button>
+            </div>
             <label>
               Game
               <select
@@ -3153,45 +3133,11 @@ export default function App() {
               </select>
             </label>
             <label>
-              Game branch
-              <select
-                value={addForm.steamBetaBranch}
-                onChange={(event) =>
-                  setAddForm((previous) => ({
-                    ...previous,
-                    steamBetaBranch: event.target.value,
-                  }))
-                }
-              >
-                <option value="latest_experimental">Experimental/latest</option>
-                <option value="public">Public/stable</option>
-              </select>
-            </label>
-            <label>
               Region
               <input
                 value={addForm.region}
                 onChange={(event) => setAddForm((previous) => ({ ...previous, region: event.target.value }))}
               />
-            </label>
-            <label>
-              Profile
-              <select
-                value={addForm.selectedProfileId}
-                onChange={(event) =>
-                  setAddForm((previous) => ({
-                    ...previous,
-                    selectedProfileId: event.target.value,
-                  }))
-                }
-              >
-                <option value="">Boot with default config</option>
-                {profiles.map((profile) => (
-                  <option key={profile.profileId} value={profile.profileId}>
-                    {profile.name}
-                  </option>
-                ))}
-              </select>
             </label>
             <label>
               World
@@ -3226,90 +3172,67 @@ export default function App() {
                 placeholder="Optional world identifier"
               />
             </label>
-            <div className="modal-actions">
-              <label>
-                Save profile name
-                <input
-                  value={profileName}
-                  onChange={(event) => setProfileName(event.target.value)}
-                  placeholder="Profile name"
-                />
-              </label>
-              <label>
-                Save profile description
-                <input
-                  value={profileDescription}
-                  onChange={(event) => setProfileDescription(event.target.value)}
-                  placeholder="Description"
-                />
-              </label>
-              <button type="button" className="btn btn-small" onClick={handleSaveProfile}>
-                Save current config as profile
-              </button>
-            </div>
-            <label>
-              World seed JSON
-              <textarea
-                rows={6}
-                value={worldSeedText}
-                onChange={(event) => setWorldSeedText(event.target.value)}
-              />
-            </label>
-            <div className="modal-actions">
-              <label>
-                World name
-                <input
-                  value={worldName}
-                  onChange={(event) => setWorldPresetName(event.target.value)}
-                  placeholder="World name"
-                />
-              </label>
-              <label>
-                World description
-                <input
-                  value={worldDescription}
-                  onChange={(event) => setWorldDescription(event.target.value)}
-                  placeholder="Description"
-                />
-              </label>
-              <button type="button" className="btn btn-small" onClick={handleSaveWorld}>
-                Save as world
-              </button>
-            </div>
-            {supportsServerConfig(addForm.gameId) && (
-              <div>
-                {serverConfigKey && <small className="field-hint">S3: {serverConfigKey}</small>}
-                <ServerConfigEditor
-                  xml={serverConfigXml}
-                  onChange={handleServerConfigXmlChange}
-                  disabled={serverConfigLoading}
-                  contextLabel={serverConfigLoading
-                    ? 'Loading serverconfig.xml…'
-                    : `Launch settings for ${addForm.worldName || 'selected world'}`}
-                />
+            <details className="disclosure launch-options">
+              <summary>Optional launch settings</summary>
+              <div className="launch-options-content">
+                <label>
+                  Game branch
+                  <select value={addForm.steamBetaBranch} onChange={(event) => setAddForm((previous) => ({ ...previous, steamBetaBranch: event.target.value }))}>
+                    <option value="latest_experimental">Experimental/latest</option>
+                    <option value="public">Public/stable</option>
+                  </select>
+                </label>
+                <label>
+                  Configuration profile
+                  <select value={addForm.selectedProfileId} onChange={(event) => setAddForm((previous) => ({ ...previous, selectedProfileId: event.target.value }))}>
+                    <option value="">Use default configuration</option>
+                    {profiles.map((profile) => <option key={profile.profileId} value={profile.profileId}>{profile.name}</option>)}
+                  </select>
+                </label>
               </div>
+            </details>
+            <details className="disclosure launch-options">
+              <summary>Create reusable presets</summary>
+              <div className="launch-options-content">
+                <div className="modal-actions">
+                  <label>Profile name<input value={profileName} onChange={(event) => setProfileName(event.target.value)} placeholder="Profile name" /></label>
+                  <label>Profile description<input value={profileDescription} onChange={(event) => setProfileDescription(event.target.value)} placeholder="Description" /></label>
+                  <button type="button" className="btn btn-small" onClick={handleSaveProfile}>Save configuration profile</button>
+                </div>
+                <label>World seed JSON<textarea rows={6} value={worldSeedText} onChange={(event) => setWorldSeedText(event.target.value)} /></label>
+                <div className="modal-actions">
+                  <label>Preset name<input value={worldName} onChange={(event) => setWorldPresetName(event.target.value)} placeholder="World name" /></label>
+                  <label>Preset description<input value={worldDescription} onChange={(event) => setWorldDescription(event.target.value)} placeholder="Description" /></label>
+                  <button type="button" className="btn btn-small" onClick={handleSaveWorld}>Save world preset</button>
+                </div>
+              </div>
+            </details>
+            {supportsServerConfig(addForm.gameId) && (
+              <AdvancedConfigDisclosure
+                open={launchAdvancedOpen}
+                attentionRequired={serverConfigLoading || Boolean(serverConfigValidationError)}
+                onOpenChange={setLaunchAdvancedOpen}
+              >
+                {serverConfigKey && <small className="field-hint">S3: {serverConfigKey}</small>}
+                <ServerConfigEditor xml={serverConfigXml} onChange={handleServerConfigXmlChange} disabled={serverConfigLoading} contextLabel={serverConfigLoading ? 'Loading serverconfig.xml…' : `Launch settings for ${addForm.worldName || 'selected world'}`} />
+              </AdvancedConfigDisclosure>
             )}
             <div className="modal-actions">
               <button type="button" className="btn btn-small" onClick={() => setShowAddInstance(false)}>
                 Cancel
               </button>
-              <button
-                type="button"
-                className="btn btn-success"
+              <LaunchStartButton
+                label={launchButtonLabel({
+                  configSaving: serverConfigSaving,
+                  instanceCreating,
+                  supportsConfig: supportsServerConfig(addForm.gameId),
+                })}
+                disabledReason={startInstanceDisabledReason}
                 onClick={handleCreateInstance}
-                disabled={serverConfigLoading || serverConfigSaving || instanceCreating || Boolean(
-                  supportsServerConfig(addForm.gameId) ? serverConfigValidationError : undefined,
-                )}
-              >
-                {serverConfigSaving
-                  ? 'Saving config...'
-                  : instanceCreating
-                    ? 'Launching...'
-                    : supportsServerConfig(addForm.gameId) ? 'Save config & launch' : 'Launch'}
-              </button>
+              />
             </div>
           </div>
-        </div>
+        </AccessibleDialog>
       )}
 
       <div className="toast-stack" aria-live="polite">

@@ -56,20 +56,26 @@ export async function initializeAuth() {
     return;
   }
 
+  const userPoolId = COGNITO_USER_POOL_ID!;
+  const userPoolClientId = COGNITO_USER_POOL_CLIENT_ID!;
+  const region = COGNITO_REGION!;
+  const domain = COGNITO_DOMAIN!;
+
   Amplify.configure({
     Auth: {
       Cognito: {
-        userPoolId: COGNITO_USER_POOL_ID,
-        userPoolClientId: COGNITO_USER_POOL_CLIENT_ID,
-        region: COGNITO_REGION,
+        userPoolId,
+        userPoolClientId,
+        // @ts-expect-error Amplify accepts this explicit runtime region although its v6 resource type omits it.
+        region,
         loginWith: {
           oauth: {
-            domain: COGNITO_DOMAIN,
+            domain,
             scopes: OAUTH_SCOPES,
             redirectSignIn: [OAUTH_SIGN_IN],
             redirectSignOut: [OAUTH_SIGN_OUT],
             responseType: 'code',
-            providers: ['COGNITO'],
+            providers: ['COGNITO' as never],
           },
         },
       },
