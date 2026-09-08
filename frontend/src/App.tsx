@@ -133,6 +133,7 @@ interface InstanceForm {
   selectedWorldId: string;
   worldName: string;
   steamBetaBranch: string;
+  capacityType: 'spot' | 'on-demand';
 }
 
 interface WorldRuntimeState {
@@ -803,6 +804,7 @@ export default function App() {
     selectedWorldId: '',
     worldName: '',
     steamBetaBranch: 'latest_experimental',
+    capacityType: 'spot',
   });
   const [profiles, setProfiles] = useState<GameProfile[]>([]);
   const [worlds, setWorlds] = useState<WorldPreset[]>([]);
@@ -1551,6 +1553,7 @@ export default function App() {
       selectedWorldId: '',
       worldName: '',
       steamBetaBranch: 'latest_experimental',
+      capacityType: 'spot',
     });
     setProfileName('');
     setProfileDescription('');
@@ -1604,6 +1607,7 @@ export default function App() {
       selectedWorldId: world.worldId,
       worldName: world.name,
       steamBetaBranch: 'latest_experimental',
+      capacityType: 'spot',
     });
     setProfileName('');
     setProfileDescription('');
@@ -1663,6 +1667,7 @@ export default function App() {
         selectedWorldId: addForm.selectedWorldId || undefined,
         worldName: addForm.worldName || undefined,
         steamBetaBranch: addForm.steamBetaBranch,
+        purchaseOption: addForm.capacityType,
       }, `create-instance:${Date.now()}:${Math.random().toString(36).slice(2)}`);
       setInstances((current) => [created, ...current]);
       setShowAddInstance(false);
@@ -3172,6 +3177,30 @@ export default function App() {
                 placeholder="Optional world identifier"
               />
             </label>
+            <fieldset className="launch-capacity-choice">
+              <legend>Instance purchase option</legend>
+              <label>
+                <input
+                  type="radio"
+                  name="capacity-type"
+                  value="spot"
+                  checked={addForm.capacityType === 'spot'}
+                  onChange={() => setAddForm((previous) => ({ ...previous, capacityType: 'spot' }))}
+                />
+                Spot (lower cost; AWS can reclaim it)
+              </label>
+              <label>
+                <input
+                  type="radio"
+                  name="capacity-type"
+                  value="on-demand"
+                  checked={addForm.capacityType === 'on-demand'}
+                  onChange={() => setAddForm((previous) => ({ ...previous, capacityType: 'on-demand' }))}
+                />
+                On-demand (not reclaimed; higher cost)
+              </label>
+              <small className="field-hint">Both options automatically terminate the EC2 instance when you shut down the server.</small>
+            </fieldset>
             <details className="disclosure launch-options">
               <summary>Optional launch settings</summary>
               <div className="launch-options-content">

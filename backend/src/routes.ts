@@ -622,14 +622,6 @@ async function resolveSubnetZoneMap(subnetIds: string[]): Promise<Record<string,
   return map;
 }
 
-async function resolveSpotLaunchChoice(
-  subnetIds: string[],
-  instanceType: string,
-  bumpPercent: number,
-): Promise<{ subnetId: string; availabilityZone: string; maxPrice?: string }> {
-  return (await resolveSpotLaunchCandidates(subnetIds, instanceType, bumpPercent))[0];
-}
-
 async function resolveSpotLaunchCandidates(
   subnetIds: string[],
   instanceType: string,
@@ -686,7 +678,30 @@ async function resolveSpotLaunchCandidates(
     }));
 }
 
-function renderBootstrapTemplate(profile: GameProfileItem, worldPrefix: string, gameId: string): string {
+async function resolveOnDemandLaunchCandidates(
+  subnetIds: string[],
+): Promise<{ subnetId: string; availabilityZone: string; maxPrice?: string }[]> {
+  const subnetZoneMap = await resolveSubnetZoneMap(subnetIds);
+  const candidates = subnetIds
+    .map((subnetId) => ({ subnetId, availabilityZone: subnetZoneMap[subnetId] }))
+    .filter(
+      (candidate): candidate is { subnetId: string; availabilityZone: string; maxPrice?: string } =>
+        Boolean(candidate.availabilityZone),
+    );
+
+  if (candidates.length === 0) {
+    throw new Error("No usable subnet/az pair was found for launch");
+  }
+
+  return candidates;
+}
+
+function renderBootstrapTemplate(
+  profile: GameProfileItem,
+  worldPrefix: string,
+  gameId: string,
+  capacityType: "spot" | "on-demand" = "spot",
+): string {
   let template = bootstrapTemplate();
   const manageServerConfig = supportsManagedServerConfig(profile, gameId);
   const replacements: Record<string, string> = {
@@ -714,7 +729,9 @@ function renderBootstrapTemplate(profile: GameProfileItem, worldPrefix: string, 
     GAME_UDP_PORTS: String(asIntList(profile.udpPorts).join(',')),
     GAME_TCP_PORTS: String(asIntList(profile.tcpPorts).join(',')),
     GAME_INGRESS_CIDR: shellSingleQuote(profile.ingressCidr || "0.0.0.0/0"),
-    SERVER_NAME: shellSingleQuote(`${profile.gameName || gameId}-spot-${randomUUID().slice(0, 6)}`),
+    SERVER_NAME: shellSingleQuote(
+      `${profile.gameName || gameId}-${capacityType}-${randomUUID().slice(0, 6)}`,
+    ),
     ENFORCE_BOOTSTRAP_LOG_PREFIX: shellSingleQuote(config.logs.bootstrapPrefix),
     ENFORCE_SERVER_LOG_PREFIX: shellSingleQuote(config.logs.serverPrefix),
     AMI_BUILDER_MODE: shellSingleQuote(profile.profileEnv?.AMI_BUILDER_MODE || "0"),
@@ -2041,6 +2058,10 @@ async function createInstancesForSpec(
   if (!spec.gameId) {
     throw new Error("Missing gameId");
   }
+  const purchaseOption = spec.purchaseOption ?? "spot";
+  if (purchaseOption !== "spot" && purchaseOption !== "on-demand") {
+    throw new Error("purchaseOption must be either spot or on-demand");
+  }
 
   const allProfiles = await gameProfilesRepository.scanByPrefix(
     "pk",
@@ -2229,6 +2250,7 @@ async function createInstancesForSpec(
     bootstrapProfile as unknown as GameProfileItem,
     worldPrefix,
     gameId,
+    purchaseOption,
   );
   const userData = encodeUserData(bootstrapScript);
 
@@ -2271,16 +2293,21 @@ async function createInstancesForSpec(
 
   let createdIds: string[] = [];
   let launchedInstanceType = instanceType;
-  let launchedSpot: Awaited<ReturnType<typeof resolveSpotLaunchChoice>> | undefined;
+  let launchedPlacement:
+    | { subnetId: string; availabilityZone: string; maxPrice?: string }
+    | undefined;
   let lastLaunchError: unknown;
   try {
     for (const candidateInstanceType of instanceTypeCandidates) {
-      const candidateSpots = await resolveSpotLaunchCandidates(
-        subnetIds,
-        candidateInstanceType,
-        spotBumpPercent,
-      );
-      for (const candidateSpot of candidateSpots) {
+      const candidatePlacements =
+        purchaseOption === "spot"
+          ? await resolveSpotLaunchCandidates(
+              subnetIds,
+              candidateInstanceType,
+              spotBumpPercent,
+            )
+          : await resolveOnDemandLaunchCandidates(subnetIds);
+      for (const candidatePlacement of candidatePlacements) {
         try {
           const result = await ec2Client.send(
             new RunInstancesCommand({
@@ -2293,19 +2320,25 @@ async function createInstancesForSpec(
               NetworkInterfaces: [
                 {
                   DeviceIndex: 0,
-                  SubnetId: candidateSpot.subnetId,
+                  SubnetId: candidatePlacement.subnetId,
                   AssociatePublicIpAddress: true,
                   Groups: securityGroupIds,
                 },
               ],
-              InstanceMarketOptions: {
-                MarketType: "spot",
-                SpotOptions: {
-                  SpotInstanceType: "one-time",
-                  InstanceInterruptionBehavior: "terminate",
-                  ...(candidateSpot.maxPrice ? { MaxPrice: candidateSpot.maxPrice } : {}),
-                },
-              },
+              ...(purchaseOption === "spot"
+                ? {
+                    InstanceMarketOptions: {
+                      MarketType: "spot" as const,
+                      SpotOptions: {
+                        SpotInstanceType: "one-time" as const,
+                        InstanceInterruptionBehavior: "terminate" as const,
+                        ...(candidatePlacement.maxPrice
+                          ? { MaxPrice: candidatePlacement.maxPrice }
+                          : {}),
+                      },
+                    },
+                  }
+                : {}),
               BlockDeviceMappings: blockDevices,
               InstanceInitiatedShutdownBehavior: "terminate",
               UserData: userData,
@@ -2325,6 +2358,7 @@ async function createInstancesForSpec(
                     { Key: "WorldPrefix", Value: worldPrefix },
                     { Key: "RequestedInstanceType", Value: instanceType },
                     { Key: "LaunchedInstanceType", Value: candidateInstanceType },
+                    { Key: "CapacityType", Value: purchaseOption },
                     { Key: "AmiSource", Value: launchImage.amiSource },
                     ...(launchImage.bakedAmiReason
                       ? [{ Key: "BakedAmiReason", Value: launchImage.bakedAmiReason }]
@@ -2348,11 +2382,11 @@ async function createInstancesForSpec(
             throw new Error("No instance ids returned from RunInstances");
           }
           launchedInstanceType = candidateInstanceType;
-          launchedSpot = candidateSpot;
+          launchedPlacement = candidatePlacement;
           break;
         } catch (error) {
           lastLaunchError = error;
-          if (!isSpotCapacityError(error)) {
+          if (purchaseOption !== "spot" || !isSpotCapacityError(error)) {
             throw error;
           }
         }
@@ -2374,8 +2408,8 @@ async function createInstancesForSpec(
     throw error;
   }
 
-  if (!launchedSpot) {
-    throw new Error("No spot placement was selected for launch");
+  if (!launchedPlacement) {
+    throw new Error("No launch placement was selected");
   }
 
   if (gameId === "windrose" || gameId === "7d2d") {
@@ -2386,7 +2420,7 @@ async function createInstancesForSpec(
         profile: bootstrapProfile as unknown as GameProfileItem,
         worldPrefix,
         worldBucket,
-        subnetId: launchedSpot.subnetId,
+        subnetId: launchedPlacement.subnetId,
         securityGroupIds,
         keyName,
         instanceProfileName,
@@ -2404,10 +2438,13 @@ async function createInstancesForSpec(
     worldPrefix,
     worldName: spec.worldName,
     worldLabel,
-    availabilityZone: launchedSpot.availabilityZone,
-    subnetId: launchedSpot.subnetId,
+    availabilityZone: launchedPlacement.availabilityZone,
+    subnetId: launchedPlacement.subnetId,
     securityGroupIds,
-    spotPriceAtLaunch: launchedSpot.maxPrice,
+    ...(purchaseOption === "spot" && launchedPlacement.maxPrice
+      ? { spotPriceAtLaunch: launchedPlacement.maxPrice }
+      : {}),
+    capacityType: purchaseOption,
     serverName,
   };
   
@@ -2428,9 +2465,9 @@ async function createInstancesForSpec(
       windroseDeploymentId: launchImage.windroseDeploymentId,
       amiBuildKey: launchImage.amiBuildKey,
       instanceType: launchedInstanceType,
-      subnetId: launchedSpot.subnetId,
+      subnetId: launchedPlacement.subnetId,
       securityGroupIds,
-      tags: { ...(spec.tags ?? {}), gameId: spec.gameId },
+      tags: { ...(spec.tags ?? {}), gameId: spec.gameId, capacityType: purchaseOption },
       bootstrapProfile: "requested:bootstrap",
       profileType: "bootstrap",
       selectedProfileId: selectedProfile.profileId,
@@ -3702,6 +3739,7 @@ export function createRouter(): Router {
             count: rawSpec.count,
             amiId: rawSpec.amiId,
             instanceType: rawSpec.instanceType,
+            purchaseOption: rawSpec.purchaseOption,
             keyName: rawSpec.keyName,
             subnetId: rawSpec.subnetId,
             securityGroupIds: rawSpec.securityGroupIds,

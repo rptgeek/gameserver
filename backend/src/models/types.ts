@@ -99,6 +99,7 @@ export interface InstanceItem {
   privateIp?: string;
   startedAt?: string;
   spotPriceAtLaunch?: string;
+  capacityType?: "spot" | "on-demand";
   terminationReasonCode?: string;
   terminationReason?: string;
   stateTransitionReason?: string;
@@ -190,6 +191,8 @@ export interface InstanceCreateRequest {
   subnetIds?: string[];
   amiId?: string;
   instanceType?: string;
+  /** Spot is the default. On-demand instances are not reclaimable by EC2 Spot. */
+  purchaseOption?: "spot" | "on-demand";
   spotPriceBumpPercent?: number;
   subnetId?: string;
   keyName?: string;

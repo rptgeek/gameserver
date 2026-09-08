@@ -443,6 +443,7 @@ export async function createInstance(payload: {
   selectedWorldId?: string;
   worldName?: string;
   steamBetaBranch?: string;
+  purchaseOption?: 'spot' | 'on-demand';
 }, idempotencyKey?: string): Promise<ServerInstance> {
   const result = await request<
     | ServerInstance
