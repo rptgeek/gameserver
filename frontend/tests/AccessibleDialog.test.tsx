@@ -37,6 +37,10 @@ describe('AccessibleDialog', () => {
     const input = screen.getByRole('textbox', { name: 'World name' });
     expect(close).toHaveFocus();
 
+    await user.tab();
+    expect(input).toHaveFocus();
+    await user.keyboard('{Shift>}{Tab}{/Shift}');
+    expect(close).toHaveFocus();
     await user.keyboard('{Shift>}{Tab}{/Shift}');
     expect(input).toHaveFocus();
     await user.tab();
