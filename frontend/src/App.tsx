@@ -1,4 +1,5 @@
 import React from 'react';
+import FoundryPanel from './FoundryPanel';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import ServerConfigEditor, { serverConfigXmlValidationError } from './ServerConfigEditor';
 import AccessibleDialog from './AccessibleDialog';
@@ -2174,6 +2175,8 @@ export default function App() {
           </button>
         </div>
       </header>
+
+      {workspaceView === 'fleet' && <FoundryPanel />}
 
       {workspaceView === 'alerts' ? (
         <main className="alert-history-page">

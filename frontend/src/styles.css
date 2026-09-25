@@ -10,6 +10,12 @@
   --danger: #ff6c88;
 }
 
+.foundry-panel { margin: 1rem; padding: 1.25rem; background: var(--panel); }
+.foundry-panel h2 { margin-top: 0; }
+.foundry-panel p { color: var(--muted); }
+.foundry-actions { display: flex; flex-wrap: wrap; gap: .75rem; }
+.foundry-panel [role="alert"] { color: var(--danger); }
+
 * {
   box-sizing: border-box;
 }

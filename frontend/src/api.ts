@@ -19,6 +19,18 @@ const env = (import.meta as { env: Env }).env;
 const API_BASE_URL = (env.VITE_API_BASE_URL || '/api').replace(/\/+$/, '');
 
 type Query = Record<string, string | undefined>;
+export interface FoundryStatus {
+  configured: boolean;
+  instanceId?: string;
+  state?: string;
+  ready?: boolean;
+  url?: string;
+}
+export const foundryStatus = () => request<FoundryStatus>('/v1/foundry');
+export const foundryAction = (action: 'start' | 'stop' | 'backup') =>
+  request<{ state: string; commandId?: string; instanceId?: string }>('/v1/foundry/actions', { method: 'POST', body: { action } });
+export const foundryCommand = (commandId: string, instanceId: string) =>
+  request<{ status: string }>(`/v1/foundry/commands/${encodeURIComponent(commandId)}`, {}, { instanceId });
 type GetOperationApiResponse = OperationResult | { operation: OperationResult };
 
 export class UnauthorizedError extends Error {

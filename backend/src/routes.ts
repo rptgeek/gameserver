@@ -38,6 +38,7 @@ import {
 import { createRemoteJWKSet, jwtVerify, JWTPayload } from "jose";
 
 import { config } from "./config";
+import { createFoundryRouter } from "./foundry";
 import { ddbClient, ec2Client, logsClient, s3Client, ssmClient } from "./aws";
 import { BaseRepository } from "./models/repositories";
 import {
@@ -2703,6 +2704,13 @@ async function executeInstanceAction(
   action: SupportedAction,
   requireAdmin = false,
 ): Promise<OperationItem> {
+  const described = await ec2Client.send(new DescribeInstancesCommand({ InstanceIds: [instanceId] }));
+  if (described.Reservations?.some(reservation => reservation.Instances?.some(instance =>
+    instance.Tags?.some(tag => tag.Key === "ManagedBy" && tag.Value === "foundry-console")))) {
+    const error = new Error("Use the Foundry controls to preserve its campaign data") as Error & { statusCode: number };
+    error.statusCode = 409;
+    throw error;
+  }
   if (requireAdmin && req.user.role !== "admin") {
     const error = new Error("admin role required") as Error & { statusCode: number };
     error.statusCode = 403;
@@ -2829,6 +2837,7 @@ export function createRouter(): Router {
   });
 
   router.use(requireAuth);
+  router.use("/v1/foundry", createFoundryRouter(ec2Client, ssmClient, ddbClient, config.tables.operations));
 
   router.get(
     "/v1/games",
