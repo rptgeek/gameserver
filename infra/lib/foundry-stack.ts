@@ -29,12 +29,11 @@ export class FoundryStack extends cdk.Stack {
       // Never expire the latest campaign merely because nobody played for a while.
       lifecycleRules: [{ noncurrentVersionExpiration: cdk.Duration.days(90), abortIncompleteMultipartUploadAfter: cdk.Duration.days(1) }],
     });
-    const credentialsParameter = '/gameserver/dev/foundry/access';
     const originParameter = '/gameserver/dev/foundry/origin-token';
     const role = new iam.Role(this, 'HostRole', { assumedBy: new iam.ServicePrincipal('ec2.amazonaws.com'), managedPolicies: [iam.ManagedPolicy.fromAwsManagedPolicyName('AmazonSSMManagedInstanceCore')] });
     backupBucket.grantReadWrite(role);
     role.addToPolicy(new iam.PolicyStatement({ actions: ['ec2:CreateTags'], resources: [this.formatArn({ service: 'ec2', resource: 'instance', resourceName: '*' })], conditions: { StringEquals: { 'ec2:ResourceTag/FoundryDeployment': id } } }));
-    role.addToPolicy(new iam.PolicyStatement({ actions: ['ssm:GetParameter'], resources: [credentialsParameter, originParameter].map(name => this.formatArn({ service: 'ssm', resource: 'parameter', resourceName: name.slice(1) })) }));
+    role.addToPolicy(new iam.PolicyStatement({ actions: ['ssm:GetParameter'], resources: [originParameter].map(name => this.formatArn({ service: 'ssm', resource: 'parameter', resourceName: name.slice(1) })) }));
     const profile = new iam.CfnInstanceProfile(this, 'HostProfile', { roles: [role.roleName] });
     const installer = new assets.Asset(this, 'Installer', { path: props.installerPath });
     const system = new assets.Asset(this, 'DccSystem', { path: props.systemPath });
@@ -62,7 +61,7 @@ export class FoundryStack extends cdk.Stack {
     const env = {
       AWS_DEFAULT_REGION: this.region, BACKUP_BUCKET: backupBucket.bucketName,
       INSTALLER_URI: installer.s3ObjectUrl, SYSTEM_URI: system.s3ObjectUrl, OPERATIONS_URI: operations.s3ObjectUrl,
-      CREDENTIALS_PARAMETER: credentialsParameter, ORIGIN_PARAMETER: originParameter,
+      ORIGIN_PARAMETER: originParameter,
       PUBLIC_HOST: distribution.distributionDomainName, DISTRIBUTION_ID: distribution.distributionId,
     };
     userData.addCommands('set -euo pipefail', 'umask 077',
@@ -96,6 +95,5 @@ export class FoundryStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'LaunchTemplateId', { value: launchTemplate.ref });
     new cdk.CfnOutput(this, 'BackupBucket', { value: backupBucket.bucketName });
     new cdk.CfnOutput(this, 'FoundryUrl', { value: `https://${distribution.distributionDomainName}/` });
-    new cdk.CfnOutput(this, 'AccessCredentialsParameter', { value: credentialsParameter });
   }
 }

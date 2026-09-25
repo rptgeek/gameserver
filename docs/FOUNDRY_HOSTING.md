@@ -14,8 +14,8 @@ template sets that shutdown to **terminate**. The 32-GiB
 encrypted root disk and temporary public IP disappear with the instance.
 
 There is no idle EC2 instance, EBS volume, Elastic IP, NAT gateway, or load balancer.
-S3 retains the saves and installation assets. Standard encrypted SSM parameters
-hold the entrance credentials and CloudFront origin token. Do not put the installer,
+S3 retains the saves and installation assets. A Standard encrypted SSM parameter
+holds the CloudFront origin token. Do not put the installer,
 license, credentials, or campaign data in Git.
 
 ## Failure behavior
@@ -37,8 +37,8 @@ license, credentials, or campaign data in Git.
 ## Deployment
 
 Use `scripts/deploy-foundry.ps1` from PowerShell with the installer path and the DCC
-system directory. It validates the package version, creates missing encrypted
-entrance credentials without replacing existing ones, and deploys the separate
+system directory. It validates the package version, creates the encrypted
+origin token if missing, and deploys the separate
 `gameserver-foundry-dev` CDK stack. The stack creates a launch template; it does not
 start a session. `scripts/deploy-foundry-console.ps1` backs up the existing Lambda
 package and frontend, builds both, updates the existing console, checks API health,
@@ -57,12 +57,12 @@ require rebinding its origin for an already-running session. Viewer traffic uses
 HTTPS; the origin hop uses HTTP limited to the CloudFront managed prefix list and
 an unguessable origin header. Foundry's port and SSH are not open publicly.
 
-The entrance credentials are in SecureString parameter `/gameserver/dev/foundry/access`.
-Retrieve them privately in the AWS console. On first use, enter the purchased license,
-accept Foundry's license terms, set a separate Foundry administrator password, and
-create a world using `dcc-crawler`. Save and stop to preserve this activation/configuration.
-Players need the entrance login plus their Foundry world credentials; do not share
-the Foundry administrator password.
+The site uses Foundry's own administrator and world-user authentication, without
+an additional browser Basic Authentication prompt. On first use, enter the purchased
+license, accept Foundry's terms, set an administrator password, and create a world
+using `dcc-crawler`. Players use their Foundry world credentials; do not share the
+administrator password. Save and stop preserves all Foundry credentials and configuration.
+The former `/gameserver/dev/foundry/access` parameter is unused.
 
 ## Recovery and verification
 

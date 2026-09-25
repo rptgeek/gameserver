@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 umask 077
-dnf install -y nginx httpd-tools unzip xz jq util-linux
+dnf install -y nginx unzip xz jq util-linux
 
 mkdir -p /srv/foundry
 # A failed restore must never silently start a fresh campaign.
@@ -42,12 +42,7 @@ if [[ ! -f /srv/foundry/userdata/Data/systems/dcc-crawler/system.json ]]; then
   mkdir -p /srv/foundry/userdata/Data/systems/dcc-crawler
   unzip -q /tmp/dcc-system.zip -d /srv/foundry/userdata/Data/systems/dcc-crawler
 fi
-aws ssm get-parameter --name "$CREDENTIALS_PARAMETER" --with-decryption --query Parameter.Value --output text > /root/foundry-access.json
 aws ssm get-parameter --name "$ORIGIN_PARAMETER" --with-decryption --query Parameter.Value --output text > /root/foundry-origin-token
-# Extra entrance password protects the license/setup screen before activation.
-jq -r .password /root/foundry-access.json | htpasswd -i -c /etc/nginx/foundry.htpasswd gary
-chmod 640 /etc/nginx/foundry.htpasswd
-chown root:nginx /etc/nginx/foundry.htpasswd
 origin_token="$(cat /root/foundry-origin-token)"
 cat > /etc/nginx/nginx.conf <<EOF
 user nginx;
@@ -61,8 +56,6 @@ http {
   server {
     listen 80 default_server;
     if (\$http_x_foundry_origin != "$origin_token") { return 403; }
-    auth_basic "Private Foundry table";
-    auth_basic_user_file /etc/nginx/foundry.htpasswd;
     client_max_body_size 100m;
     location / {
       proxy_pass http://127.0.0.1:30000;
@@ -130,5 +123,5 @@ curl --fail --retry 20 --retry-connrefused --retry-delay 3 http://127.0.0.1:3000
 imds_token="$(curl -fsS -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' http://169.254.169.254/latest/api/token)"
 instance_id="$(curl -fsS -H "X-aws-ec2-metadata-token: $imds_token" http://169.254.169.254/latest/meta-data/instance-id)"
 aws ec2 create-tags --resources "$instance_id" --tags Key=FoundryReady,Value=yes
-rm -f /root/foundry-access.json /root/foundry-origin-token /root/foundry-cf.json /root/foundry-cf-update.json /tmp/foundry.zip /tmp/dcc-system.zip "/tmp/${node_archive}" /tmp/node-shasums.txt
+rm -f /root/foundry-origin-token /root/foundry-cf.json /root/foundry-cf-update.json /tmp/foundry.zip /tmp/dcc-system.zip "/tmp/${node_archive}" /tmp/node-shasums.txt
 echo 'Foundry installation complete. Activate the license and set a Foundry administrator password in the browser.'

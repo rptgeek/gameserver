@@ -33,8 +33,6 @@ function Get-OrCreateSecureParameter([string]$Name, [string]$InitialValue) {
   return $result
 }
 
-$password = [Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(16)).ToLowerInvariant()
-$access = Get-OrCreateSecureParameter '/gameserver/dev/foundry/access' (@{username='gary';password=$password} | ConvertTo-Json -Compress)
 $token = Get-OrCreateSecureParameter '/gameserver/dev/foundry/origin-token' ([Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(32)).ToLowerInvariant())
 $env:FOUNDRY_INSTALLER_PATH = (Resolve-Path -LiteralPath $InstallerPath).Path
 $env:FOUNDRY_SYSTEM_PATH = (Resolve-Path -LiteralPath $SystemPath).Path
@@ -42,4 +40,4 @@ Push-Location (Join-Path $repoRoot 'infra')
 try {
   & npx cdk deploy --app 'npx ts-node --prefer-ts-exts bin/foundry.ts' --parameters "OriginToken=$token" --require-approval never --outputs-file (Join-Path $privateDir 'outputs.json')
   if ($LASTEXITCODE -ne 0) { throw 'Foundry stack deployment failed' }
-} finally { Pop-Location; $password=$null; $access=$null; $token=$null }
+} finally { Pop-Location; $token=$null }
