@@ -886,7 +886,12 @@ async function launchAmiBuilderIfNeeded(args: {
   );
 }
 
-function bootstrapTemplate(): string {
+// A Windows checkout (core.autocrlf) yields CRLF, which makes bash abort on `set -o pipefail\r`.
+export function bootstrapTemplate(): string {
+  return readBootstrapTemplate().replace(/\r\n?/g, "\n");
+}
+
+function readBootstrapTemplate(): string {
   if (process.env.BOOTSTRAP_TEMPLATE) {
     return process.env.BOOTSTRAP_TEMPLATE;
   }
