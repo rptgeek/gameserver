@@ -1,5 +1,30 @@
-import React, { useEffect, useState } from 'react';
-import { foundryAction, foundryCommand, foundryStatus, type FoundryStatus } from './api';
+import React, { useEffect, useRef, useState } from 'react';
+import { foundryAction, foundryCommand, foundryStatus, getLogs, type FoundryCapacity, type FoundryStatus } from './api';
+import type { LogType } from './types';
+
+const FOUNDRY_PHASES = [
+  { key: 'ec2', label: 'Launching EC2 server' },
+  { key: 'bootstrap', label: 'Bootstrapping host' },
+  { key: 'files', label: 'Restoring campaign save' },
+  { key: 'install', label: 'Installing Node.js and Foundry' },
+  { key: 'config', label: 'Configuring Foundry and HTTPS proxy' },
+  { key: 'game', label: 'Starting Foundry' },
+  { key: 'network', label: 'Connecting HTTPS address' },
+  { key: 'ready', label: 'Foundry ready' },
+];
+
+export function foundryPhaseIndex(bootstrapLines: string[], ready: boolean): number {
+  if (ready) return FOUNDRY_PHASES.length - 1;
+  let index = 0;
+  for (const line of bootstrapLines) {
+    const key = line.match(/LAUNCH_PHASE\s+phase=([a-z-]+)/i)?.[1]?.toLowerCase();
+    const found = FOUNDRY_PHASES.findIndex(phase => phase.key === key);
+    if (found > index) index = found;
+  }
+  return index;
+}
+
+const stripAnsi = (line: string) => line.replace(/\u001b\[[0-9;]*m/g, '');
 
 type Pending = { action: 'start' | 'stop' | 'backup'; commandId?: string; instanceId?: string };
 const STORAGE_KEY = 'gameserver.foundry.pending';
@@ -16,6 +41,35 @@ export default function FoundryPanel() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
+  const [capacity, setCapacity] = useState<FoundryCapacity>('on-demand');
+  const [logs, setLogs] = useState<Record<LogType, string[]>>({ bootstrap: [], server: [] });
+  const [logTab, setLogTab] = useState<LogType>('bootstrap');
+  const logOutputRef = useRef<HTMLPreElement>(null);
+  const instanceId = server?.instanceId;
+
+  useEffect(() => {
+    setLogs({ bootstrap: [], server: [] });
+    if (!instanceId) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    async function refreshLogs(id: string) {
+      try {
+        const [bootstrap, serverLog] = await Promise.all([getLogs(id, 'bootstrap', undefined, 250), getLogs(id, 'server', undefined, 250)]);
+        if (!cancelled) setLogs({ bootstrap: bootstrap.lines.map(stripAnsi), server: serverLog.lines.map(stripAnsi) });
+      } catch {
+        // Logs are best-effort; status polling reports real failures.
+      } finally {
+        if (!cancelled) timer = setTimeout(() => void refreshLogs(id), 10000);
+      }
+    }
+    void refreshLogs(instanceId);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [instanceId]);
+
+  useEffect(() => {
+    const output = logOutputRef.current;
+    if (output) output.scrollTop = output.scrollHeight;
+  }, [logs, logTab]);
 
   useEffect(() => {
     if (pending) sessionStorage.setItem(STORAGE_KEY, JSON.stringify(pending));
@@ -64,7 +118,7 @@ export default function FoundryPanel() {
       : 'Disconnect players briefly, back up the campaign, and restart Foundry?')) return;
     setBusy(true); setError(''); setMessage('');
     try {
-      const result = await foundryAction(action);
+      const result = await foundryAction(action, action === 'start' ? capacity : undefined);
       if (result.state === 'not-running') {
         setPending(null); setServer(current => current && ({ ...current, state: 'not-running' }));
       } else setPending({ action, commandId: result.commandId, instanceId: result.instanceId });
@@ -73,13 +127,32 @@ export default function FoundryPanel() {
   }
 
   const disabled = busy || Boolean(pending);
+  const launching = Boolean(instanceId) && (server?.state === 'pending' || (server?.state === 'running' && !server.ready));
+  const phaseIndex = foundryPhaseIndex(logs.bootstrap, Boolean(server?.ready));
+  const bootstrapFailed = logs.bootstrap.some(line => line.includes('BOOTSTRAP_FAILED'));
+  const capacityLabel = server?.capacityType === 'spot' ? 'Spot' : server?.capacityType === 'on-demand' ? 'On-demand' : undefined;
   return <section className="panel foundry-panel" aria-labelledby="foundry-title">
     <div><h2 id="foundry-title">Foundry · Dungeon Crawler Carl</h2>
       <p>Resume your campaign with the same characters, scenes, and journals.</p></div>
     {!server ? <p>Checking Foundry…</p> : !server.configured
       ? <p>Foundry is not deployed yet.</p>
       : <>
-        <p role="status">{pending ? (pending.action === 'start' ? 'Starting and restoring your save. This can take several minutes…' : 'Saving campaign and verifying backup…') : server.state === 'running' && !server.ready ? 'Preparing Foundry and HTTPS…' : `Server: ${server.state}`}</p>
+        <p role="status">{pending ? (pending.action === 'start' ? 'Starting and restoring your save. This can take several minutes…' : 'Saving campaign and verifying backup…') : server.state === 'running' && !server.ready ? 'Preparing Foundry and HTTPS…' : `Server: ${server.state}`}{capacityLabel && ` · ${capacityLabel}`}</p>
+        {['not-running', 'stopped'].includes(server.state || '') && !pending && <fieldset className="launch-capacity-choice">
+          <legend>Instance purchase option</legend>
+          <label><input type="radio" name="foundry-capacity" value="on-demand" checked={capacity === 'on-demand'} onChange={() => setCapacity('on-demand')} />
+            On-demand (not reclaimed; higher cost)</label>
+          <label><input type="radio" name="foundry-capacity" value="spot" checked={capacity === 'spot'} onChange={() => setCapacity('spot')} />
+            Spot (lower cost; AWS can reclaim it)</label>
+          <small className="field-hint">If AWS reclaims a Spot server, Foundry backs up the campaign during the two-minute notice.</small>
+        </fieldset>}
+        {launching && <div className="launch-progress">
+          <div className="launch-progress-top"><strong>{FOUNDRY_PHASES[phaseIndex].label}</strong></div>
+          <div className="launch-phase-list">
+            {FOUNDRY_PHASES.map((phase, index) => <span key={phase.key} className={index < phaseIndex ? 'done' : index === phaseIndex ? 'active' : ''}>{phase.label}</span>)}
+          </div>
+        </div>}
+        {bootstrapFailed && <p role="alert">Foundry setup failed on the server. Check the bootstrap log below.</p>}
         <div className="foundry-actions">
           <button className="btn" disabled={disabled || !['not-running', 'stopped'].includes(server.state || '')} onClick={() => void act('start')}>Start Foundry</button>
           <button className="btn" disabled={disabled || server.state !== 'running'} onClick={() => void act('stop')}>Save and stop</button>
@@ -87,6 +160,16 @@ export default function FoundryPanel() {
           {server.state === 'running' && server.ready && !pending && server.url && <a className="btn" href={server.url} target="_blank" rel="noreferrer">Open Foundry</a>}
         </div>
         <p>Save and stop verifies your campaign in S3, then removes the temporary server and disk. Only saved files remain between sessions.</p>
+        {instanceId && <div className="log-panel">
+          <div className="log-toolbar" role="tablist" aria-label="Foundry logs">
+            {(['bootstrap', 'server'] as const).map(kind => <button key={kind} type="button" role="tab" aria-selected={logTab === kind}
+              className={`btn ${logTab === kind ? 'active' : ''}`} onClick={() => setLogTab(kind)}>{kind === 'bootstrap' ? 'Bootstrap log' : 'Server log'}</button>)}
+          </div>
+          <pre ref={logOutputRef} className="log-output log-output-stream" tabIndex={0} role="log"
+            aria-label={`Foundry ${logTab === 'bootstrap' ? 'bootstrap' : 'server'} log`}>
+            {logs[logTab].join('\n') || 'Waiting for log lines…'}
+          </pre>
+        </div>}
       </>}
     {message && <p role="status">{message}</p>}
     {error && <p role="alert">{error}</p>}

@@ -1,8 +1,10 @@
 import { NextFunction, Request, Response, Router } from "express";
 import { DescribeInstancesCommand, EC2Client, RunInstancesCommand, StartInstancesCommand } from "@aws-sdk/client-ec2";
 import { GetCommandInvocationCommand, GetParameterCommand, SendCommandCommand, SSMClient } from "@aws-sdk/client-ssm";
-import { DynamoDBDocumentClient, PutCommand } from "@aws-sdk/lib-dynamodb";
+import { DeleteCommand, DynamoDBDocumentClient, PutCommand } from "@aws-sdk/lib-dynamodb";
 import { randomUUID } from "node:crypto";
+
+export type FoundryCapacity = "spot" | "on-demand";
 
 export interface FoundryConfig {
   deploymentId: string;
@@ -35,7 +37,7 @@ export function createFoundryRouter(ec2: EC2Client, ssm: SSMClient, ddb: DynamoD
     }
   }
 
-  async function state(value: FoundryConfig): Promise<{ state: string; instanceId?: string; ready: boolean }> {
+  async function state(value: FoundryConfig): Promise<{ state: string; instanceId?: string; ready: boolean; capacityType?: FoundryCapacity; launchedAt?: string }> {
     const result = await ec2.send(new DescribeInstancesCommand({ Filters: [
       { Name: "tag:ManagedBy", Values: ["foundry-console"] },
       { Name: "tag:FoundryDeployment", Values: [value.deploymentId] },
@@ -45,7 +47,9 @@ export function createFoundryRouter(ec2: EC2Client, ssm: SSMClient, ddb: DynamoD
     if (instances.length > 1) throw new Error("Multiple Foundry servers detected; reconcile before continuing");
     const instance = instances[0];
     return { state: instance?.State?.Name || "not-running", instanceId: instance?.InstanceId,
-      ready: Boolean(instance?.Tags?.some(tag => tag.Key === "FoundryReady" && tag.Value === "yes")) };
+      ready: Boolean(instance?.Tags?.some(tag => tag.Key === "FoundryReady" && tag.Value === "yes")),
+      capacityType: instance ? (instance.InstanceLifecycle === "spot" ? "spot" : "on-demand") : undefined,
+      launchedAt: instance?.LaunchTime?.toISOString() };
   }
 
   router.get("/", wrap(async (_req, res) => {
@@ -58,6 +62,10 @@ export function createFoundryRouter(ec2: EC2Client, ssm: SSMClient, ddb: DynamoD
     const action: unknown = req.body?.action;
     if (action !== "start" && action !== "stop" && action !== "backup") {
       res.status(400).json({ error: "Action must be start, stop, or backup" }); return;
+    }
+    const capacity: unknown = req.body?.capacity ?? "on-demand";
+    if (capacity !== "spot" && capacity !== "on-demand") {
+      res.status(400).json({ error: "Capacity must be spot or on-demand" }); return;
     }
     const value = await configuration();
     if (!value) { res.status(409).json({ error: "Foundry has not been deployed" }); return; }
@@ -76,9 +84,10 @@ export function createFoundryRouter(ec2: EC2Client, ssm: SSMClient, ddb: DynamoD
         // Serialize launches across users/tabs/Lambda invocations. Keep the lease
         // through EC2 eventual consistency and ambiguous network failures.
         const now = Math.floor(Date.now() / 1000);
+        const leaseKey = { pk: `foundry-launch#${value.deploymentId}` };
         try {
           await ddb.send(new PutCommand({ TableName: operationsTable,
-            Item: { pk: `foundry-launch#${value.deploymentId}`, leaseUntil: now + 180, ttl: now + 3600 },
+            Item: { ...leaseKey, leaseUntil: now + 180, ttl: now + 3600 },
             ConditionExpression: "attribute_not_exists(pk) OR leaseUntil < :now", ExpressionAttributeValues: { ":now": now } }));
         } catch (error) {
           if ((error as Error).name === "ConditionalCheckFailedException") {
@@ -90,9 +99,21 @@ export function createFoundryRouter(ec2: EC2Client, ssm: SSMClient, ddb: DynamoD
         if ((await state(value)).state !== "not-running") {
           res.status(409).json({ error: "Foundry is already starting" }); return;
         }
-        await ec2.send(new RunInstancesCommand({ LaunchTemplate: { LaunchTemplateId: value.launchTemplateId, Version: "$Latest" }, MinCount: 1, MaxCount: 1, ClientToken: randomUUID() }));
+        try {
+          await ec2.send(new RunInstancesCommand({
+            LaunchTemplate: { LaunchTemplateId: value.launchTemplateId, Version: "$Latest" }, MinCount: 1, MaxCount: 1, ClientToken: randomUUID(),
+            // EC2 rejects termination protection on Spot; the IAM deny still blocks console termination.
+            ...(capacity === "spot" ? { DisableApiTermination: false, InstanceMarketOptions: { MarketType: "spot", SpotOptions: { SpotInstanceType: "one-time", InstanceInterruptionBehavior: "terminate" } } } : {}),
+          }));
+        } catch (error) {
+          // EC2 definitively rejected the request (e.g. no Spot capacity), so allow an immediate retry.
+          if ((error as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode === 400) {
+            await ddb.send(new DeleteCommand({ TableName: operationsTable, Key: leaseKey })).catch(() => undefined);
+          }
+          throw error;
+        }
       }
-      res.status(202).json({ action, state: "pending" }); return;
+      res.status(202).json({ action, state: "pending", capacityType: capacity }); return;
     }
     if (action === "stop" && (currentState === "not-running" || currentState === "shutting-down")) {
       res.json({ action, state: currentState }); return;

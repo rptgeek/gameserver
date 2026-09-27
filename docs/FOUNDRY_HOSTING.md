@@ -1,7 +1,7 @@
 # Foundry sessions backed by S3
 
 The existing Game Fleet Console gains a Foundry panel. Each session launches one
-on-demand t3.medium in us-east-1, installs licensed Foundry 14.368 with Node 24.13.1,
+t3.medium in us-east-1 (on-demand by default, or Spot when chosen at start), installs licensed Foundry 14.368 with Node 24.13.1,
 restores the last verified save, and serves it through a stable CloudFront HTTPS URL.
 The initial DCC system is packaged from the separate dcc-foundry-vtt repository.
 
@@ -27,6 +27,14 @@ license, credentials, or campaign data in Git.
   pointer require explicit recovery; they never become an empty campaign.
 - Start calls use a DynamoDB lease and an EC2 client token to prevent duplicate
   runtimes. A failed launch may require a three-minute wait before retrying.
+- Spot sessions run a watcher that takes a verified backup when AWS sends the
+  two-minute interruption notice. EC2 does not allow termination protection on Spot,
+  so only the IAM denial guards those hosts against console termination.
+- The host name is pinned to `foundry-dcc` because Foundry binds license.json to it;
+  after the first session with this change, the license no longer needs re-confirming.
+- Bootstrap and Foundry output ship to the console's `/7d2d/bootstrap` and
+  `/7d2d/server` log groups (`<instance>-bootstrap` / `<instance>-server` streams),
+  with `LAUNCH_PHASE` markers driving the panel's launch progress.
 - A failure of the EC2 host itself can lose changes since the last verified backup.
   Use Back up now at a natural break for long sessions; it briefly disconnects players.
 - API termination protection and an IAM denial protect Foundry from the legacy

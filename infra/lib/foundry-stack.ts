@@ -33,6 +33,10 @@ export class FoundryStack extends cdk.Stack {
     const role = new iam.Role(this, 'HostRole', { assumedBy: new iam.ServicePrincipal('ec2.amazonaws.com'), managedPolicies: [iam.ManagedPolicy.fromAwsManagedPolicyName('AmazonSSMManagedInstanceCore')] });
     backupBucket.grantReadWrite(role);
     role.addToPolicy(new iam.PolicyStatement({ actions: ['ec2:CreateTags'], resources: [this.formatArn({ service: 'ec2', resource: 'instance', resourceName: '*' })], conditions: { StringEquals: { 'ec2:ResourceTag/FoundryDeployment': id } } }));
+    // Share the console's log groups so Foundry logs appear like any other server's.
+    const logGroups = { bootstrap: '/7d2d/bootstrap', server: '/7d2d/server' };
+    role.addToPolicy(new iam.PolicyStatement({ actions: ['logs:CreateLogStream', 'logs:PutLogEvents', 'logs:DescribeLogStreams'],
+      resources: Object.values(logGroups).map(name => this.formatArn({ service: 'logs', resource: 'log-group', resourceName: `${name}:*`, arnFormat: cdk.ArnFormat.COLON_RESOURCE_NAME })) }));
     role.addToPolicy(new iam.PolicyStatement({ actions: ['ssm:GetParameter'], resources: [originParameter].map(name => this.formatArn({ service: 'ssm', resource: 'parameter', resourceName: name.slice(1) })) }));
     const profile = new iam.CfnInstanceProfile(this, 'HostProfile', { roles: [role.roleName] });
     const installer = new assets.Asset(this, 'Installer', { path: props.installerPath });
@@ -62,6 +66,7 @@ export class FoundryStack extends cdk.Stack {
       AWS_DEFAULT_REGION: this.region, BACKUP_BUCKET: backupBucket.bucketName,
       INSTALLER_URI: installer.s3ObjectUrl, SYSTEM_URI: system.s3ObjectUrl, OPERATIONS_URI: operations.s3ObjectUrl,
       ORIGIN_PARAMETER: originParameter,
+      LOG_GROUP_BOOTSTRAP: logGroups.bootstrap, LOG_GROUP_SERVER: logGroups.server,
       PUBLIC_HOST: distribution.distributionDomainName, DISTRIBUTION_ID: distribution.distributionId,
     };
     userData.addCommands('set -euo pipefail', 'umask 077',
